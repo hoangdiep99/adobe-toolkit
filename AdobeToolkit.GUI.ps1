@@ -29,7 +29,7 @@ $script:CoreFnNames = @(
     'Get-AdobeCredentialTargets', 'Initialize-Win32Cred', 'ConvertFrom-AppInfoName', 'Get-FriendlyAppName',
     'Get-SignInGroups', 'Get-ProdInstallListXml', 'Get-EmbeddedLeftoverCatalog', 'Get-TokenMap', 'Test-SafeToRemove',
     'Get-SharedComponentPatterns', 'Test-InUse', 'Test-SafeRegistryKey',
-    'Get-LeftoverTargets', 'Get-IntegrityIssues', 'Get-BackupSessions', 'Save-BackupRecord', 'Invoke-ManualBackup'
+    'Get-LeftoverTargets', 'Get-IntegrityIssues', 'Invoke-IntegrityRepair', 'Get-AppRelatedPaths', 'Invoke-DeepUninstallApps', 'Invoke-WipeAllAdobeTraces', 'Get-BackupSessions', 'Save-BackupRecord', 'Invoke-ManualBackup'
 )
 $script:CoreInitScript = "Set-StrictMode -Version 2; `$script:LogFile = `$null;`r`n" + (
     ($script:CoreFnNames | ForEach-Object {
@@ -264,7 +264,8 @@ Add-Nav 'diag'  '1.  Chẩn đoán máy'         92
 Add-Nav 'sign'  '2.  Sửa lỗi đăng nhập'     138
 Add-Nav 'orig'  '3.  Khôi phục nguyên bản'  184
 Add-Nav 'left'  '4.  Dọn dữ liệu còn sót'   230
-Add-Nav 'undo'  '5.  Hoàn tác / Sao lưu'    276
+Add-Nav 'unin'  '5.  Gỡ cài đặt tận gốc'   276
+Add-Nav 'undo'  '6.  Hoàn tác / Sao lưu'    322
 
 # ===================================================== Trang 1: chan doan
 $p1 = New-Page 'Chẩn đoán máy' 'Kiểm tra giờ máy, file hosts, tường lửa, chữ ký số file Adobe (.bak/patch) và token đăng nhập. Chạy ngầm không đơ máy.'
@@ -508,7 +509,106 @@ $btnApply3.Add_Click({
     } catch { Fail $_.Exception.Message }
 })
 
-# ===================================================== Trang 5: hoan tac / sao luu
+# ===================================================== Trang 5: go cai dat tan goc & xoa sach dau vet Adobe
+$pUnin = New-Page 'Gỡ cài đặt tận gốc (Force Clean / Deep Uninstall)' 'Gỡ cài đặt từng app Adobe (tự động quét xoá luôn thư mục cài đặt, cache và giấy phép riêng) hoặc GỠ TẤT CẢ & XOÁ SẠCH DẤU VẾT ADOBE.'
+$pages['unin'] = $pUnin
+$btnScanUnin = New-Btn $pUnin 'Quét app đang cài' 0 145 $true
+$btnAllUnin  = New-Btn $pUnin 'Chọn tất cả' 153 100
+$btnNoneUnin = New-Btn $pUnin 'Bỏ chọn' 261 90
+$btnExecUnin = New-Btn $pUnin 'Gỡ tận gốc app đã chọn' 359 180; $btnExecUnin.Enabled = $false
+$btnWipeAll  = New-Btn $pUnin '⚠ GỠ TẤT CẢ & XOÁ SẠCH ADOBE' 547 245
+$btnWipeAll.BackColor = $cDanger; $btnWipeAll.ForeColor = 'White'; $btnWipeAll.FlatAppearance.BorderColor = $cDanger
+
+$listUnin = New-List $pUnin @(@('Ứng dụng Adobe', 235), @('Phiên bản', 105), @('Mã SAP', 85), @('Thư mục / Cơ chế gỡ tận gốc', 370))
+$listUnin.CheckBoxes = $true
+$script:installedApps = @()
+
+function Refresh-UninstallList {
+    Start-AsyncScan -CommandText 'Get-InstalledAdobe' -TriggerButton $btnScanUnin -StatusText 'Đang quét danh sách ứng dụng Adobe đang cài trên máy...' -OnSuccess {
+        param($res)
+        $script:installedApps = @($res)
+        $listUnin.BeginUpdate()
+        try {
+            $listUnin.Items.Clear()
+            foreach ($a in $script:installedApps) {
+                $it = New-Object Windows.Forms.ListViewItem([string]$a.Name)
+                [void]$it.SubItems.Add([string]$a.Version)
+                [void]$it.SubItems.Add([string]$a.SapCode)
+                $locNote = if ($a.InstallLocation) { "$($a.InstallLocation) + Dọn sạch cache & giấy phép" } else { 'Trình gỡ Adobe + Dọn sạch thư mục, cache & giấy phép' }
+                [void]$it.SubItems.Add($locNote)
+                $it.Tag = $a
+                if ($a.Name -match 'Creative Cloud') { $it.ForeColor = $cWarn }
+                [void]$listUnin.Items.Add($it)
+            }
+        } finally {
+            $listUnin.EndUpdate()
+        }
+        $btnExecUnin.Enabled = $listUnin.Items.Count -gt 0
+        Say ("Quét gỡ cài đặt: {0} ứng dụng Adobe đang cài." -f $script:installedApps.Count)
+    }
+}
+
+$btnScanUnin.Add_Click({ Refresh-UninstallList })
+$btnAllUnin.Add_Click({ foreach ($it in $listUnin.Items) { $it.Checked = $true } })
+$btnNoneUnin.Add_Click({ foreach ($it in $listUnin.Items) { $it.Checked = $false } })
+
+$btnExecUnin.Add_Click({
+    $picked = @($listUnin.CheckedItems | ForEach-Object { $_.Tag })
+    if (-not $picked.Count) { Info 'Chưa tích chọn app Adobe nào để gỡ.'; return }
+    $names = ($picked | ForEach-Object { "- $($_.Name) ($($_.Version))" }) -join "
+"
+    if (-not (Ask ("GỠ CÀI ĐẶT TẬN GỐC (Force Clean / Deep Uninstall) các app sau?
+
+$names
+
+Quá trình sẽ tự động:
+1. Đóng toàn bộ tiến trình Adobe
+2. Chạy trình gỡ cài đặt + xoá sạch thư mục cài đặt
+3. Dọn sạch cache AppData và giấy phép đăng nhập của riêng app đó
+
+Tiếp tục?"))) { return }
+    Say "Deep uninstall: $($picked.Count) app..."
+    Start-AsyncScan -CommandText 'Invoke-DeepUninstallApps -Apps $Apps -SessionDir $SessionDir' -Arguments @{ Apps = $picked; SessionDir = $script:session } -TriggerButton $btnExecUnin -StatusText 'Đang gỡ cài đặt tận gốc app đã chọn (vui lòng đợi 15-60 giây)...' -OnSuccess {
+        param($res)
+        $r = $res | Select-Object -First 1
+        $msg = "Đã gỡ tận gốc {0} app Adobe (đã dọn {1} thư mục, {2} mục giấy phép)." -f $r.UninstalledApps, $r.RemovedFolders, $r.RemovedCreds
+        Say $msg
+        Refresh-UninstallList
+        Info $msg
+    }
+})
+
+$btnWipeAll.Add_Click({
+    if (-not (Ask "CẢNH BÁO QUAN TRỌNG:
+
+Bạn đã chọn 'GỠ TẤT CẢ & XOÁ SẠCH DẤU VẾT ADOBE'.
+
+Tool sẽ tự động:
+1. Gỡ cài đặt TẤT CẢ các app Adobe và Creative Cloud
+2. Dừng & xoá toàn bộ Windows Services + Scheduled Tasks của Adobe
+3. Xoá sạch thư mục Adobe trong Program Files, Common Files, ProgramData, AppData, Temp
+4. Xoá sạch khoá Registry Adobe (HKCU & HKLM) và toàn bộ giấy phép Credential Manager
+5. Mở chặn file hosts và tường lửa
+
+Máy sẽ trở về trạng thái sạch 100% như chưa từng cài Adobe. Bạn chắc chắn muốn tiếp tục?")) { return }
+    Say '=== BAT DAU GO TAT CA & XOA SACH DAU VET ADOBE ==='
+    Start-AsyncScan -CommandText 'Invoke-WipeAllAdobeTraces -SessionDir $SessionDir' -Arguments @{ SessionDir = $script:session } -TriggerButton $btnWipeAll -StatusText 'Đang gỡ toàn bộ app và xoá sạch mọi dấu vết Adobe trên máy...' -OnSuccess {
+        param($res)
+        $r = $res | Select-Object -First 1
+        $msg = "HOÀN TẤT XOÁ SẠCH DẤU VẾT ADOBE!
+
+- App đã gỡ: {0}
+- Thư mục gốc Adobe đã xoá: {1}
+- Giấy phép Credential đã xoá: {2}
+- Dịch vụ & Task ngầm đã xoá: {3} service, {4} task
+- Nhánh Registry Adobe đã xoá: {5}" -f $r.AppsRemoved, $r.DirsWiped, $r.CredsWiped, $r.ServicesRemoved, $r.TasksRemoved, $r.RegKeysWiped
+        Say ($msg -replace '\r?\n', ' ')
+        Refresh-UninstallList
+        Info $msg
+    }
+})
+
+# ===================================================== Trang 6: hoan tac / sao luu
 $pUndo = New-Page 'Hoàn tác / Sao lưu' 'Xem lại các phiên sao lưu trước đó và khôi phục lại thư mục OOBE, cache, registry hoặc cấu hình tường lửa chỉ với 1 nút bấm.'
 $pages['undo'] = $pUndo
 $btnCreateBk   = New-Btn $pUndo 'Tạo bản sao lưu ngay' 0 180 $true

@@ -38,14 +38,292 @@ function Get-AdobeBusyProcesses {
 }
 
 function Get-InstalledAdobe {
+    $seen = @{}
+    $out = New-Object System.Collections.Generic.List[object]
     foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
                    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*') {
         foreach ($i in (Get-ItemProperty $k -ErrorAction SilentlyContinue)) {
             $p = $i.PSObject.Properties
             if ($p['Publisher'] -and $p['DisplayName'] -and $i.Publisher -match 'Adobe') {
-                [pscustomobject]@{ Name = $i.DisplayName; Version = $(if ($p['DisplayVersion']) { $i.DisplayVersion } else { '' }) }
+                $keyName = [string]$i.PSChildName
+                if ($seen.ContainsKey($keyName)) { continue }
+                $seen[$keyName] = $true
+                $uninst = $(if ($p['UninstallString']) { [string]$i.UninstallString } else { '' })
+                $loc    = $(if ($p['InstallLocation']) { [string]$i.InstallLocation } else { '' })
+                $sap    = ''
+                if ($uninst -match '--sapCode=([A-Za-z0-9_]+)') { $sap = $Matches[1] }
+                elseif ($keyName -match '^([A-Z]+)_') { $sap = $Matches[1] }
+                $out.Add([pscustomobject]@{
+                    KeyName         = $keyName
+                    PsPath          = [string]$i.PSPath
+                    Name            = [string]$i.DisplayName
+                    Version         = $(if ($p['DisplayVersion']) { [string]$i.DisplayVersion } else { '' })
+                    SapCode         = $sap
+                    InstallLocation = $loc
+                    UninstallString = $uninst
+                })
             }
         }
+    }
+    $pfAdobe = "${env:ProgramFiles}\Adobe"
+    if (Test-Path -LiteralPath $pfAdobe) {
+        foreach ($d in (Get-ChildItem -LiteralPath $pfAdobe -Directory -ErrorAction SilentlyContinue)) {
+            $already = $false
+            foreach ($existing in $out) {
+                if ($existing.InstallLocation -and $existing.InstallLocation.TrimEnd('\') -ieq $d.FullName.TrimEnd('\')) { $already = $true; break }
+                if ($existing.Name -and $d.Name -like "*$($existing.Name)*") { $already = $true; break }
+            }
+            if (-not $already -and $d.Name -match '^Adobe ') {
+                $out.Add([pscustomobject]@{
+                    KeyName         = 'DIR_' + ($d.Name -replace '\s+', '_')
+                    PsPath          = ''
+                    Name            = $d.Name
+                    Version         = 'Standalone'
+                    SapCode         = 'DIR'
+                    InstallLocation = $d.FullName
+                    UninstallString = ''
+                })
+            }
+        }
+    }
+    $out | Sort-Object Name
+}
+
+function Get-AppRelatedPaths {
+    <# Finds all install folders, AppData caches, preferences, and credentials belonging to a specific Adobe app. #>
+    param([Parameter(Mandatory)]$App)
+    $folders = New-Object System.Collections.Generic.List[string]
+    $pf = ${env:ProgramFiles}; $pf86 = ${env:ProgramFiles(x86)}
+    $genericRoots = @("$pf\Adobe", "$pf86\Adobe", "$pf\Common Files\Adobe", "$pf86\Common Files\Adobe")
+
+    if ($App.InstallLocation) {
+        $loc = $App.InstallLocation.TrimEnd('\')
+        if (($genericRoots -notcontains $loc) -and (Test-Path -LiteralPath $loc) -and (Test-SafeToRemove $loc)) {
+            $folders.Add($loc)
+        }
+    }
+
+    $cleanName = ($App.Name -replace '^Adobe\s+', '' -replace '\s+\d{4}.*$', '' -replace '\s+\(Beta\)', '').Trim()
+    $searchPatterns = New-Object System.Collections.Generic.List[string]
+    if ($App.Name) { $searchPatterns.Add($App.Name) }
+    if ($cleanName -and $cleanName.Length -ge 4) { $searchPatterns.Add($cleanName) }
+
+    foreach ($root in @("$pf\Adobe", "$pf86\Adobe", "$env:APPDATA\Adobe", "$env:LOCALAPPDATA\Adobe", "$env:ProgramData\Adobe")) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        foreach ($sub in (Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
+            foreach ($pat in $searchPatterns) {
+                if ($sub.Name -ieq $App.Name -or ($pat -ne 'Creative Cloud' -and $sub.Name -like "*$pat*")) {
+                    if ($App.Name -notmatch 'Beta' -and $sub.Name -match 'Beta') { continue }
+                    if ($App.Name -match '\b(20\d\d)\b' -and $sub.Name -match '\b(20\d\d)\b' -and $Matches[1] -ne ($App.Name -replace '.*?\b(20\d\d)\b.*', '$1')) { continue }
+                    if (-not $folders.Contains($sub.FullName) -and (Test-SafeToRemove $sub.FullName)) {
+                        $folders.Add($sub.FullName)
+                    }
+                }
+            }
+        }
+    }
+    return $folders.ToArray()
+}
+
+function Invoke-DeepUninstallApps {
+    <# Runs official Adobe uninstaller (silent if possible) and then force-removes leftover folders, cache, registry, and credentials for selected apps. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object[]]$Apps, [string]$SessionDir)
+    if (Get-AdobeBusyProcesses) { $null = Stop-AdobeProcesses }
+    Initialize-Win32Cred
+
+    $ordered = @($Apps | Sort-Object { if ($_.Name -match 'Creative Cloud') { 1 } else { 0 } })
+    $removedFolders = 0
+    $removedCreds   = 0
+    $uninstalled    = 0
+
+    foreach ($app in $ordered) {
+        Write-Log "Deep uninstalling app: $($app.Name) ($($app.Version))"
+        $preFolders = @(Get-AppRelatedPaths -App $app)
+
+        if ($app.UninstallString) {
+            try {
+                if ($app.UninstallString -match '^"([^"]+)"\s*(.*)$') {
+                    $exe  = $Matches[1]
+                    $args = $Matches[2]
+                    if (Test-Path -LiteralPath $exe) {
+                        $runArgs = $args -replace '--mode=2', '--mode=1'
+                        Write-Log "Running uninstaller: `"$exe`" $runArgs"
+                        $p = Start-Process -FilePath $exe -ArgumentList $runArgs -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+                        if ($p) {
+                            if (-not $p.WaitForExit(120000)) {
+                                try { $p.Kill() } catch { }
+                            }
+                        }
+                    }
+                }
+            } catch {
+                Write-Log "Uninstaller warning for $($app.Name): $($_.Exception.Message)" 'WARN'
+            }
+        }
+
+        if (Get-AdobeBusyProcesses) { $null = Stop-AdobeProcesses }
+
+        $postFolders = @(Get-AppRelatedPaths -App $app)
+        $allFolders = @($preFolders + $postFolders | Select-Object -Unique)
+        foreach ($f in $allFolders) {
+            if ((Test-Path -LiteralPath $f) -and (Test-SafeToRemove $f)) {
+                try {
+                    Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction Stop
+                    $removedFolders++
+                    Write-Log "Force removed app folder: $f"
+                } catch {
+                    cmd /c "rmdir /s /q `"$f`"" 2>$null | Out-Null
+                    if (-not (Test-Path -LiteralPath $f)) { $removedFolders++; Write-Log "Force removed (cmd) app folder: $f" }
+                }
+            }
+        }
+
+        $cleanKey = ($app.Name -replace '^Adobe\s+', '' -replace '\s+\d{4}.*$', '' -replace '\s+', '').Trim()
+        foreach ($c in (Get-AdobeCredentialTargets)) {
+            $raw = ConvertFrom-AppInfoName $c
+            $matchCred = $false
+            if ($raw -and $cleanKey -and $raw -like "*$cleanKey*") { $matchCred = $true }
+            elseif ($app.Name -match 'Lightroom' -and $c -match '^Adobe Lightroom:') { $matchCred = $true }
+            elseif ($app.Name -match 'Photoshop' -and $c -match '^Adobe Photoshop:') { $matchCred = $true }
+            if ($matchCred) {
+                if ([AdobeWin32Cred]::DeleteTarget($c)) {
+                    $removedCreds++
+                    Write-Log "Removed app credential: $c"
+                }
+            }
+        }
+
+        if ($app.PsPath -and (Test-Path -LiteralPath $app.PsPath)) {
+            try {
+                Remove-Item -LiteralPath $app.PsPath -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Log "Removed uninstall registry key: $($app.KeyName)"
+            } catch { }
+        }
+        $uninstalled++
+    }
+
+    return [pscustomobject]@{
+        UninstalledApps = $uninstalled
+        RemovedFolders  = $removedFolders
+        RemovedCreds    = $removedCreds
+    }
+}
+
+function Invoke-WipeAllAdobeTraces {
+    <# NUCLEAR DEEP CLEAN: Uninstalls all Adobe apps, stops & deletes Adobe services, scheduled tasks,
+       removes all Adobe folders (Program Files, Common Files, ProgramData, AppData, Temp),
+       removes all Adobe registry keys (HKCU + HKLM), cleans hosts & firewall rules, and wipes all Adobe credentials. #>
+    [CmdletBinding()]
+    param([string]$SessionDir)
+    Write-Log "=== STARTING FULL ADOBE WIPE (XOA SACH DAU VET ADOBE) ==="
+
+    $null = Stop-AdobeProcesses
+
+    $allApps = @(Get-InstalledAdobe)
+    if ($allApps.Count -gt 0) {
+        $null = Invoke-DeepUninstallApps -Apps $allApps -SessionDir $SessionDir
+    }
+
+    $svcCount = 0
+    foreach ($svc in (Get-Service -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -match '^(Adobe|AGMService|AGSService|CCXProcess)' -or $_.DisplayName -match 'Adobe'
+    })) {
+        try {
+            Stop-Service -Name $svc.Name -Force -ErrorAction SilentlyContinue
+            sc.exe delete $svc.Name 2>$null | Out-Null
+            $svcCount++
+            Write-Log "Deleted service: $($svc.Name)"
+        } catch { }
+    }
+
+    $taskCount = 0
+    try {
+        foreach ($t in (Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
+            $_.TaskName -match 'Adobe' -or $_.TaskPath -match 'Adobe'
+        })) {
+            Unregister-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -Confirm:$false -ErrorAction SilentlyContinue
+            $taskCount++
+            Write-Log "Removed scheduled task: $($t.TaskName)"
+        }
+    } catch { }
+
+    Initialize-Win32Cred
+    $credCount = 0
+    foreach ($c in (Get-AdobeCredentialTargets)) {
+        if ([AdobeWin32Cred]::DeleteTarget($c)) {
+            $credCount++
+            Write-Log "Wiped credential: $c"
+        }
+    }
+
+    $null = Stop-AdobeProcesses
+    $pf = ${env:ProgramFiles}; $pf86 = ${env:ProgramFiles(x86)}
+    $adobeDirs = @(
+        "$pf\Adobe",
+        "$pf86\Adobe",
+        "$pf\Common Files\Adobe",
+        "$pf86\Common Files\Adobe",
+        "$env:ProgramData\Adobe",
+        "$env:LOCALAPPDATA\Adobe",
+        "$env:APPDATA\Adobe",
+        "$env:LOCALAPPDATA\Temp\Adobe",
+        "$env:LOCALAPPDATA\Temp\CreativeCloud",
+        "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Adobe*"
+    )
+    $dirCount = 0
+    foreach ($d in (Get-Item -Path $adobeDirs -Force -ErrorAction SilentlyContinue)) {
+        try {
+            Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction Stop
+            $dirCount++
+            Write-Log "Wiped directory: $($d.FullName)"
+        } catch {
+            cmd /c "rmdir /s /q `"$($d.FullName)`"" 2>$null | Out-Null
+            if (-not (Test-Path -LiteralPath $d.FullName)) { $dirCount++ }
+        }
+    }
+
+    $regCount = 0
+    $regPaths = @(
+        'HKCU:\Software\Adobe',
+        'HKLM:\SOFTWARE\Adobe',
+        'HKLM:\SOFTWARE\WOW6432Node\Adobe'
+    )
+    foreach ($rp in $regPaths) {
+        if (Test-Path -LiteralPath $rp) {
+            try {
+                Remove-Item -LiteralPath $rp -Recurse -Force -ErrorAction SilentlyContinue
+                $regCount++
+                Write-Log "Wiped registry key: $rp"
+            } catch { }
+        }
+    }
+    foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                   'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*') {
+        foreach ($i in (Get-ItemProperty $k -ErrorAction SilentlyContinue)) {
+            $p = $i.PSObject.Properties
+            if ($p['Publisher'] -and $i.Publisher -match 'Adobe') {
+                try {
+                    Remove-Item -LiteralPath $i.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                    $regCount++
+                } catch { }
+            }
+        }
+    }
+
+    $issues = @(Get-IntegrityIssues | Where-Object { $_.Kind -in @('HostsBlock', 'FirewallBlock') })
+    if ($issues.Count -gt 0) {
+        $null = Invoke-IntegrityRepair -Items $issues -SessionDir $SessionDir -Apply
+    }
+
+    Write-Log "=== FULL ADOBE WIPE COMPLETE ==="
+    return [pscustomobject]@{
+        AppsRemoved     = $allApps.Count
+        DirsWiped       = $dirCount
+        CredsWiped      = $credCount
+        ServicesRemoved = $svcCount
+        TasksRemoved    = $taskCount
+        RegKeysWiped    = $regCount
     }
 }
 
