@@ -1,0 +1,8 @@
+# Ignore local diagnostic reports and temporary build files
+report.json
+dist/report.json
+*.old.exe
+*.Bundled.ps1
+*.win32manifest
+*.log
+dist/themngoaile.bat
