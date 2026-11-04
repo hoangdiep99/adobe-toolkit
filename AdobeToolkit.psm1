@@ -294,8 +294,7 @@ public static class AdobeWin32Cred {
 function Invoke-SignInClean {
     [CmdletBinding()]
     param([string]$SessionDir, [switch]$Apply)
-    $busy = Get-AdobeBusyProcesses
-    if ($busy) { throw 'Adobe apps are running. Close them (including the Creative Cloud tray icon) first.' }
+    if (Get-AdobeBusyProcesses) { $null = Stop-AdobeProcesses }
 
     $folders = @(Get-SignInFolders); $creds = @(Get-AdobeCredentialTargets)
     Write-Log ("Sign-in clean: {0} folders, {1} credentials. Apply={2}" -f $folders.Count, $creds.Count, [bool]$Apply)
@@ -460,7 +459,7 @@ function Invoke-LeftoverClean {
     $todo = @($Targets | Where-Object { $IncludeInUse -or -not $_.InUse })
     Write-Log ("Leftover clean: {0} selected, {1} skipped as in-use. Apply={2}" -f $todo.Count, (@($Targets).Count - $todo.Count), [bool]$Apply)
     if (-not $Apply) { return $todo }
-    if (Get-AdobeBusyProcesses) { throw 'Adobe apps are running. Close them first.' }
+    if (Get-AdobeBusyProcesses) { $null = Stop-AdobeProcesses }
 
     $bk = Join-Path $SessionDir 'backup-leftovers'; New-Item -ItemType Directory -Force -Path $bk | Out-Null
     $n = 0
@@ -552,7 +551,7 @@ function Invoke-SignInGroups {
     $dirs  = @($Groups | ForEach-Object { $_.Folders } | ForEach-Object { $_ })
     Write-Log ("Sign-in groups: {0}. {1} credentials, {2} folders. Apply={3}" -f (($Groups | ForEach-Object { $_.Name }) -join ', '), $creds.Count, $dirs.Count, [bool]$Apply)
     if (-not $Apply) { return [pscustomobject]@{ Credentials = $creds; Folders = $dirs; Applied = $false } }
-    if (Get-AdobeBusyProcesses) { throw 'Adobe apps are running. Close them first.' }
+    if (Get-AdobeBusyProcesses) { $null = Stop-AdobeProcesses }
     Initialize-Win32Cred
     $bk = Join-Path $SessionDir 'backup'; New-Item -ItemType Directory -Force -Path $bk | Out-Null
     $creds | Set-Content (Join-Path $bk 'credential-names.txt') -Encoding UTF8
@@ -575,18 +574,23 @@ function Invoke-SignInGroups {
 
 
 function Stop-AdobeProcesses {
-    <# Closes all running Adobe processes (and stops Adobe services that lock files). #>
+    <# Closes all running Adobe processes (and stops Adobe services that lock files or respawn helpers). #>
+    foreach ($svc in @('AGMService', 'AGSService', 'AdobeUpdateService', 'AdobeARMservice')) {
+        try { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue } catch { }
+    }
     $procs = @(Get-AdobeBusyProcesses)
     $names = @($procs | Select-Object -ExpandProperty Name -Unique)
-    foreach ($p in $procs) {
-        try {
-            Stop-Process -Id $p.Id -Force -ErrorAction Stop
-            Write-Log "Stopped process: $($p.Name) (PID $($p.Id))"
-        } catch {
-            Write-Log "Could not stop $($p.Name) (PID $($p.Id)): $($_.Exception.Message)" 'WARN'
+    foreach ($pass in 1..2) {
+        foreach ($p in @(Get-AdobeBusyProcesses)) {
+            try {
+                Stop-Process -Id $p.Id -Force -ErrorAction Stop
+                Write-Log "Stopped process: $($p.Name) (PID $($p.Id))"
+            } catch {
+                Write-Log "Could not stop $($p.Name) (PID $($p.Id)): $($_.Exception.Message)" 'WARN'
+            }
         }
+        Start-Sleep -Milliseconds 300
     }
-    Start-Sleep -Milliseconds 400
     return $names
 }
 
@@ -698,7 +702,7 @@ function Invoke-IntegrityRepair {
     $todo = @($Items | Where-Object { $_.CanFix })
     Write-Log ("Integrity repair: {0} selected fixable items. Apply={1}" -f $todo.Count, [bool]$Apply)
     if (-not $Apply) { return $todo }
-    if (Get-AdobeBusyProcesses) { throw 'Các app Adobe đang mở. Hãy bấm "Đóng tiến trình Adobe" trước khi khôi phục.' }
+    if (Get-AdobeBusyProcesses) { $null = Stop-AdobeProcesses }
 
     $bk = Join-Path $SessionDir 'backup-integrity'; New-Item -ItemType Directory -Force -Path $bk | Out-Null
     $n = 0
@@ -794,7 +798,7 @@ function Get-BackupSessions {
 function Restore-BackupSession {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$BackupSession)
-    if (Get-AdobeBusyProcesses) { throw 'Các app Adobe đang mở. Hãy bấm "Đóng tiến trình Adobe" trước khi hoàn tác.' }
+    if (Get-AdobeBusyProcesses) { $null = Stop-AdobeProcesses }
     $restored = 0
     foreach ($e in $BackupSession.Entries) {
         try {

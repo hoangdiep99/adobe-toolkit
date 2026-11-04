@@ -126,6 +126,14 @@ function Say([string]$m) { $logBox.AppendText("$(Get-Date -Format 'HH:mm:ss')  $
 function Ask([string]$text) { [Windows.Forms.MessageBox]::Show($text, 'Xác nhận', 'YesNo', 'Warning') -eq 'Yes' }
 function Info([string]$text, [string]$title = 'Adobe Toolkit') { [void][Windows.Forms.MessageBox]::Show($text, $title, 'OK', 'Information') }
 function Fail([string]$text) { Say "LỖI: $text"; [void][Windows.Forms.MessageBox]::Show($text, 'Lỗi', 'OK', 'Error') }
+function Ensure-AdobeClosed {
+    $busy = @(Get-AdobeBusyProcesses)
+    if ($busy.Count -gt 0) {
+        $bNames = ($busy | Select-Object -ExpandProperty Name -Unique) -join ', '
+        Say "Đang tự động đóng tiến trình Adobe đang chạy ($bNames)..."
+        $null = Stop-AdobeProcesses
+    }
+}
 
 # ---- Bo dieu phoi tac vu chay ngam (Background Runspace - Chong do giao dien)
 $script:bgJob = $null
@@ -393,7 +401,7 @@ $btnApply2.Add_Click({
     $warn = if (@($sel | Where-Object Shared).Count) { "CẢNH BÁO: bạn đã chọn thông tin tài khoản chung, TẤT CẢ app Adobe sẽ bị đăng xuất.`n`n" } else { '' }
     if (-not (Ask "${warn}Sẽ làm sạch đăng nhập của:`n$names`n`nThư mục được chuyển vào sao lưu, mục đăng nhập sẽ bị xoá. Sau đó cần đăng nhập Adobe lại. Tiếp tục?")) { return }
     try {
-        $res = Invoke-SignInGroups -Groups $sel -SessionDir $script:session -Apply
+        Ensure-AdobeClosed; $res = Invoke-SignInGroups -Groups $sel -SessionDir $script:session -Apply
         Say "Hoàn tất ($names): $($res.Credentials.Count) mục đăng nhập, $($res.Folders.Count) thư mục. Sao lưu: $($res.Backup)"
         $script:busyScan = $true; $apps.Items.Clear(); $detail.Items.Clear(); $script:busyScan = $false; $btnApply2.Enabled = $false
         Info "Hoàn tất.`n`nMở Creative Cloud, đăng nhập lại, rồi mở app cần dùng.`nSao lưu: $($res.Backup)"
@@ -442,7 +450,7 @@ $btnApplyOrig.Add_Click({
     if (-not $picked.Count) { Info 'Chưa chọn mục nào có thể khôi phục tự động.'; return }
     if (-not (Ask "Khôi phục $($picked.Count) mục đã chọn về nguyên bản (file gốc .bak / hosts / tường lửa)?`n`nTrạng thái hiện tại sẽ được sao lưu để có thể hoàn tác.")) { return }
     try {
-        $done = Invoke-IntegrityRepair -Items $picked -SessionDir $script:session -Apply
+        Ensure-AdobeClosed; $done = Invoke-IntegrityRepair -Items $picked -SessionDir $script:session -Apply
         Say "Đã khôi phục $($done.Count) mục về nguyên bản. Sao lưu tại: $($script:session)"
         $listOrig.Items.Clear(); $btnApplyOrig.Enabled = $false
         Info "Đã khôi phục $($done.Count) mục về nguyên bản.`nSao lưu tại: $($script:session)"
@@ -483,7 +491,7 @@ $btnApply3.Add_Click({
     if (-not $picked.Count) { Info 'Chưa chọn mục nào.'; return }
     if (-not (Ask "Chuyển $($picked.Count) mục vào thư mục sao lưu?`nKhóa registry sẽ được xuất ra file .reg trước khi xoá.")) { return }
     try {
-        $null = Invoke-LeftoverClean -Targets $picked -SessionDir $script:session -Apply
+        Ensure-AdobeClosed; $null = Invoke-LeftoverClean -Targets $picked -SessionDir $script:session -Apply
         Say "Hoàn tất. Sao lưu trong: $($script:session)"; $list3.Items.Clear(); $btnApply3.Enabled = $false
         Info "Hoàn tất.`nSao lưu: $($script:session)"
     } catch { Fail $_.Exception.Message }
@@ -556,7 +564,7 @@ $btnRestore.Add_Click({
     $s = $listUndo.SelectedItems[0].Tag
     if (-not (Ask "Khôi phục $($s.Count) mục từ phiên sao lưu $($s.Id) ($($s.Summary)) về vị trí ban đầu?")) { return }
     try {
-        $n = Restore-BackupSession -BackupSession $s
+        Ensure-AdobeClosed; $n = Restore-BackupSession -BackupSession $s
         Say "Đã hoàn tác $n mục từ phiên $($s.Id)."
         Refresh-UndoList
         Info "Đã khôi phục $n mục từ phiên $($s.Id)."
