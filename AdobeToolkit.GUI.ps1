@@ -66,16 +66,27 @@ $form.Size = New-Object Drawing.Size(1060, 720); $form.MinimumSize = New-Object 
 $form.StartPosition = 'CenterScreen'; $form.Font = $fUi; $form.BackColor = $cBg
 Enable-DoubleBuffer $form
 
-# ---- Tai icon cua app (tu file app.ico hoac tu chinh file EXE dang chay)
+$form.ShowIcon = $true; $form.ShowInTaskbar = $true
+try {
+    if (-not ('AdobeTaskbarAppId' -as [type])) {
+        Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class AdobeTaskbarAppId { [DllImport("shell32.dll", SetLastError=true)] public static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID); }' -ErrorAction SilentlyContinue
+    }
+    [void][AdobeTaskbarAppId]::SetCurrentProcessExplicitAppUserModelID('AdobeToolkit.DiagnosticRepair.v1')
+} catch { }
+
+# ---- Tai icon cua app (tu chinh file EXE dang chay hoac file app.ico)
 $script:appIcon = $null
 try {
-    $icoFile = Join-Path $here 'app.ico'
-    if (Test-Path -LiteralPath $icoFile) {
-        $script:appIcon = New-Object System.Drawing.Icon($icoFile, 64, 64)
-    } else {
-        $exePath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-        if ($exePath -and (Test-Path -LiteralPath $exePath)) {
-            $script:appIcon = [System.Drawing.Icon]::ExtractAssociatedIcon($exePath)
+    $exePath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    if ($exePath -and ($exePath -notmatch 'powershell\.exe$') -and (Test-Path -LiteralPath $exePath)) {
+        $script:appIcon = [System.Drawing.Icon]::ExtractAssociatedIcon($exePath)
+    }
+    if (-not $script:appIcon) {
+        foreach ($cand in @((Join-Path $here 'app.ico'), (Join-Path (Split-Path -Parent $here) 'app.ico'))) {
+            if (Test-Path -LiteralPath $cand) {
+                $script:appIcon = New-Object System.Drawing.Icon($cand)
+                break
+            }
         }
     }
     if ($script:appIcon) { $form.Icon = $script:appIcon }
