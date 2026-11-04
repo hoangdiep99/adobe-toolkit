@@ -26,7 +26,7 @@ $script:CoreFnNames = @(
     'Write-Log', 'Get-AdobeBusyProcesses', 'Stop-AdobeProcesses', 'Get-InstalledAdobe',
     'Get-AdobeMainBinaries', 'Get-AdobeFirewallBlockRules', 'Test-ImsTcpFast',
     'Get-TamperedAdobeFiles', 'Get-Diagnostics', 'Get-SignInFolders',
-    'Get-AdobeCredentialTargets', 'ConvertFrom-AppInfoName', 'Get-FriendlyAppName',
+    'Get-AdobeCredentialTargets', 'Initialize-Win32Cred', 'ConvertFrom-AppInfoName', 'Get-FriendlyAppName',
     'Get-SignInGroups', 'Get-ProdInstallListXml', 'Get-EmbeddedLeftoverCatalog', 'Get-TokenMap', 'Test-SafeToRemove',
     'Get-SharedComponentPatterns', 'Test-InUse', 'Test-SafeRegistryKey',
     'Get-LeftoverTargets', 'Get-IntegrityIssues', 'Get-BackupSessions', 'Save-BackupRecord', 'Invoke-ManualBackup'

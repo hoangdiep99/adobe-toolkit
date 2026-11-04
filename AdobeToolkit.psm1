@@ -194,6 +194,103 @@ function Get-AdobeCredentialTargets {
     $out | Sort-Object -Unique
 }
 
+function Initialize-Win32Cred {
+    if ('AdobeWin32Cred' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class AdobeWin32Cred {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct CREDENTIAL {
+        public uint Flags;
+        public uint Type;
+        public string TargetName;
+        public string Comment;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+        public uint CredentialBlobSize;
+        public IntPtr CredentialBlob;
+        public uint Persist;
+        public uint AttributeCount;
+        public IntPtr Attributes;
+        public string TargetAlias;
+        public string UserName;
+    }
+
+    [DllImport("advapi32.dll", EntryPoint = "CredDeleteW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CredDelete(string target, uint type, uint flags);
+
+    [DllImport("advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CredRead(string target, uint type, uint reservedFlag, out IntPtr credentialPtr);
+
+    [DllImport("advapi32.dll", EntryPoint = "CredWriteW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CredWrite([In] ref CREDENTIAL userCredential, [In] uint flags);
+
+    [DllImport("advapi32.dll", EntryPoint = "CredFree", SetLastError = true)]
+    private static extern void CredFree([In] IntPtr cred);
+
+    public static bool DeleteTarget(string target) {
+        bool ok = false;
+        uint[] types = new uint[] { 1, 2, 3, 4 };
+        foreach (uint t in types) {
+            if (CredDelete(target, t, 0)) ok = true;
+            if (CredDelete("LegacyGeneric:target=" + target, t, 0)) ok = true;
+        }
+        return ok;
+    }
+
+    public static string ExportTargetBase64(string target) {
+        IntPtr ptr = IntPtr.Zero;
+        uint foundType = 1;
+        bool readOk = false;
+        foreach (uint t in new uint[] { 1, 2, 3, 4 }) {
+            if (CredRead(target, t, 0, out ptr)) { foundType = t; readOk = true; break; }
+        }
+        if (!readOk || ptr == IntPtr.Zero) return null;
+        try {
+            CREDENTIAL c = (CREDENTIAL)Marshal.PtrToStructure(ptr, typeof(CREDENTIAL));
+            byte[] blob = new byte[c.CredentialBlobSize];
+            if (c.CredentialBlobSize > 0 && c.CredentialBlob != IntPtr.Zero) {
+                Marshal.Copy(c.CredentialBlob, blob, 0, (int)c.CredentialBlobSize);
+            }
+            string u = c.UserName ?? "";
+            return foundType.ToString() + "|" + c.Persist.ToString() + "|" + Convert.ToBase64String(Encoding.UTF8.GetBytes(u)) + "|" + Convert.ToBase64String(blob);
+        } finally {
+            CredFree(ptr);
+        }
+    }
+
+    public static bool RestoreTargetBase64(string target, string packed) {
+        if (string.IsNullOrEmpty(packed)) return false;
+        string[] parts = packed.Split('|');
+        if (parts.Length < 4) return false;
+        uint type = uint.Parse(parts[0]);
+        uint persist = uint.Parse(parts[1]);
+        string user = Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]));
+        byte[] blob = Convert.FromBase64String(parts[3]);
+        IntPtr blobPtr = IntPtr.Zero;
+        try {
+            if (blob.Length > 0) {
+                blobPtr = Marshal.AllocHGlobal(blob.Length);
+                Marshal.Copy(blob, 0, blobPtr, blob.Length);
+            }
+            CREDENTIAL c = new CREDENTIAL();
+            c.Type = type;
+            c.TargetName = target;
+            c.Persist = persist;
+            c.UserName = string.IsNullOrEmpty(user) ? null : user;
+            c.CredentialBlobSize = (uint)blob.Length;
+            c.CredentialBlob = blobPtr;
+            return CredWrite(ref c, 0);
+        } finally {
+            if (blobPtr != IntPtr.Zero) Marshal.FreeHGlobal(blobPtr);
+        }
+    }
+}
+'@ -ErrorAction SilentlyContinue
+}
+
 function Invoke-SignInClean {
     [CmdletBinding()]
     param([string]$SessionDir, [switch]$Apply)
@@ -204,6 +301,7 @@ function Invoke-SignInClean {
     Write-Log ("Sign-in clean: {0} folders, {1} credentials. Apply={2}" -f $folders.Count, $creds.Count, [bool]$Apply)
     if (-not $Apply) { return [pscustomobject]@{ Folders = $folders; Credentials = $creds; Applied = $false } }
 
+    Initialize-Win32Cred
     $bk = Join-Path $SessionDir 'backup'; New-Item -ItemType Directory -Force -Path $bk | Out-Null
     $creds | Set-Content (Join-Path $bk 'credential-names.txt') -Encoding UTF8
     foreach ($f in $folders) {
@@ -213,9 +311,12 @@ function Invoke-SignInClean {
         Write-Log "Moved $f -> $dest"
     }
     foreach ($c in $creds) {
-        cmdkey /delete:"$c" 2>$null | Out-Null
-        cmdkey /delete:"LegacyGeneric:target=$c" 2>$null | Out-Null
-        Write-Log "Removed credential: $c"
+        $packed = [AdobeWin32Cred]::ExportTargetBase64($c)
+        if ($packed) {
+            Save-BackupRecord -SessionDir $SessionDir -Kind 'Credential' -Source $c -BackupPath $packed
+        }
+        $del = [AdobeWin32Cred]::DeleteTarget($c)
+        Write-Log "Removed credential ($del): $c"
     }
     [pscustomobject]@{ Folders = $folders; Credentials = $creds; Applied = $true; Backup = $bk }
 }
@@ -444,7 +545,7 @@ function Get-SignInGroups {
 }
 
 function Invoke-SignInGroups {
-    <# Cleans exactly the groups passed in. Folders are moved to the backup, credential names are saved first. #>
+    <# Cleans exactly the groups passed in. Folders are moved to the backup, credentials are backed up and deleted via Win32 CredDeleteW. #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][object[]]$Groups, [string]$SessionDir, [switch]$Apply)
     $creds = @($Groups | ForEach-Object { $_.Credentials } | ForEach-Object { $_ })
@@ -452,16 +553,22 @@ function Invoke-SignInGroups {
     Write-Log ("Sign-in groups: {0}. {1} credentials, {2} folders. Apply={3}" -f (($Groups | ForEach-Object { $_.Name }) -join ', '), $creds.Count, $dirs.Count, [bool]$Apply)
     if (-not $Apply) { return [pscustomobject]@{ Credentials = $creds; Folders = $dirs; Applied = $false } }
     if (Get-AdobeBusyProcesses) { throw 'Adobe apps are running. Close them first.' }
+    Initialize-Win32Cred
     $bk = Join-Path $SessionDir 'backup'; New-Item -ItemType Directory -Force -Path $bk | Out-Null
     $creds | Set-Content (Join-Path $bk 'credential-names.txt') -Encoding UTF8
     foreach ($f in $dirs) {
-        Move-Item -LiteralPath $f -Destination (Join-Path $bk ($f -replace '[:\\]', '_')) -Force
-        Write-Log "Moved $f"
+        $dest = Join-Path $bk ($f -replace '[:\\]', '_')
+        Move-Item -LiteralPath $f -Destination $dest -Force
+        Save-BackupRecord -SessionDir $SessionDir -Kind 'Folder' -Source $f -BackupPath $dest
+        Write-Log "Moved $f -> $dest"
     }
     foreach ($c in $creds) {
-        cmdkey /delete:"$c" 2>$null | Out-Null
-        cmdkey /delete:"LegacyGeneric:target=$c" 2>$null | Out-Null
-        Write-Log "Removed credential: $c"
+        $packed = [AdobeWin32Cred]::ExportTargetBase64($c)
+        if ($packed) {
+            Save-BackupRecord -SessionDir $SessionDir -Kind 'Credential' -Source $c -BackupPath $packed
+        }
+        $del = [AdobeWin32Cred]::DeleteTarget($c)
+        Write-Log "Removed credential ($del): $c"
     }
     [pscustomobject]@{ Credentials = $creds; Folders = $dirs; Applied = $true; Backup = $bk }
 }
@@ -663,9 +770,11 @@ function Get-BackupSessions {
         }
         if ($entries.Count -gt 0) {
             $fCount  = @($entries | Where-Object { $_.Kind -in @('Folder', 'FolderCopy') }).Count
+            $cCount  = @($entries | Where-Object { $_.Kind -eq 'Credential' }).Count
             $rCount  = @($entries | Where-Object { $_.Kind -eq 'Reg' }).Count
-            $oCount  = @($entries | Where-Object { $_.Kind -notin @('Folder', 'Reg') }).Count
+            $oCount  = @($entries | Where-Object { $_.Kind -notin @('Folder', 'FolderCopy', 'Credential', 'Reg') }).Count
             $parts = @()
+            if ($cCount) { $parts += "$cCount credential" }
             if ($fCount) { $parts += "$fCount thư mục" }
             if ($rCount) { $parts += "$rCount registry" }
             if ($oCount) { $parts += "$oCount mục hệ thống/tường lửa" }
@@ -729,6 +838,13 @@ function Restore-BackupSession {
                     Write-Log "Re-enabled firewall rule: $($e.Source)"
                     $restored++
                 }
+                'Credential' {
+                    Initialize-Win32Cred
+                    if ([AdobeWin32Cred]::RestoreTargetBase64($e.Source, $e.BackupPath)) {
+                        Write-Log "Restored credential: $($e.Source)"
+                        $restored++
+                    }
+                }
             }
         } catch {
             Write-Log "Restore error on $($e.Source): $($_.Exception.Message)" 'WARN'
@@ -784,8 +900,16 @@ function Invoke-ManualBackup {
         }
     }
 
-    # 4. Save list of current Adobe Credential Manager targets for reference
-    @(Get-AdobeCredentialTargets) | Set-Content (Join-Path $bk 'credential-names.txt') -Encoding UTF8
+    # 4. Backup all current Adobe Credential Manager entries
+    Initialize-Win32Cred
+    $creds = @(Get-AdobeCredentialTargets)
+    $creds | Set-Content (Join-Path $bk 'credential-names.txt') -Encoding UTF8
+    foreach ($c in $creds) {
+        $packed = [AdobeWin32Cred]::ExportTargetBase64($c)
+        if ($packed) {
+            Save-BackupRecord -SessionDir $dir -Kind 'Credential' -Source $c -BackupPath $packed
+        }
+    }
     return $dir
 }
 
