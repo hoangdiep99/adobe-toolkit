@@ -173,7 +173,7 @@ function Invoke-DeepUninstallApps {
                     $removedFolders++
                     Write-Log "Force removed app folder: $f"
                 } catch {
-                    cmd /c "rmdir /s /q `"$f`"" 2>$null | Out-Null
+                    try { [IO.Directory]::Delete($f, $true) } catch { }
                     if (-not (Test-Path -LiteralPath $f)) { $removedFolders++; Write-Log "Force removed (cmd) app folder: $f" }
                 }
             }
@@ -231,7 +231,7 @@ function Invoke-WipeAllAdobeTraces {
     })) {
         try {
             Stop-Service -Name $svc.Name -Force -ErrorAction SilentlyContinue
-            sc.exe delete $svc.Name 2>$null | Out-Null
+            $cimSvc = Get-CimInstance Win32_Service -Filter "Name='$($svc.Name)'" -ErrorAction SilentlyContinue; if ($cimSvc) { Invoke-CimMethod -InputObject $cimSvc -MethodName Delete -ErrorAction SilentlyContinue | Out-Null }
             $svcCount++
             Write-Log "Deleted service: $($svc.Name)"
         } catch { }
@@ -278,7 +278,7 @@ function Invoke-WipeAllAdobeTraces {
             $dirCount++
             Write-Log "Wiped directory: $($d.FullName)"
         } catch {
-            cmd /c "rmdir /s /q `"$($d.FullName)`"" 2>$null | Out-Null
+            try { [IO.Directory]::Delete($d.FullName, $true) } catch { }
             if (-not (Test-Path -LiteralPath $d.FullName)) { $dirCount++ }
         }
     }
@@ -445,6 +445,63 @@ function Get-Diagnostics {
 
     $r.ImsReachable = Test-ImsTcpFast
     [pscustomobject]$r
+}
+
+
+function Get-TechnicalEvaluation {
+    param([Parameter(Mandatory)]$Diag)
+    $score = 100
+    $lines = New-Object System.Collections.Generic.List[string]
+
+    if (-not $Diag.IsAdmin) {
+        $score -= 10
+        $lines.Add('- [Quản trị] Chưa chạy quyền Admin -> Không thể khôi phục file trong Program Files hoặc sửa hosts.')
+    }
+    if (-not $Diag.ImsReachable) {
+        $score -= 30
+        $lines.Add('- [Mạng] Mất kết nối tới máy chủ xác thực Adobe (ims-na1.adobelogin.com:443) -> Bản quyền chính hãng sẽ báo mất quyền truy cập.')
+    }
+    $hn = @($Diag.HostsAdobeEntries).Count
+    if ($hn -gt 0) {
+        $score -= 25
+        $lines.Add(('- [File hosts] Phát hiện {0} dòng chặn máy chủ Adobe -> Vào Tab 3 (Khôi phục nguyên bản) để mở chặn.' -f $hn))
+    }
+    $fwn = @($Diag.FirewallBlocks).Count
+    if ($fwn -gt 0) {
+        $score -= 10
+        $lines.Add(('- [Tường lửa] Có {0} rule chặn kết nối ({1}) -> Nếu gặp lỗi đăng nhập hãy tắt trong Tab 3.' -f $fwn, (($Diag.FirewallBlocks | Select-Object -First 2) -join ', ')))
+    }
+
+    $baks   = @($Diag.TamperedFiles | Where-Object { $_ -match '^Backup\(\.bak\):' })
+    $hashes = @($Diag.TamperedFiles | Where-Object { $_ -match '^HashMismatch:' })
+    if ($baks.Count -gt 0) {
+        $score -= 15
+        $lines.Add(('- [Dấu vết .bak] Phát hiện {0} file .bak do tool can thiệp để lại -> Vào Tab 3 bấm Khôi phục mục đã chọn để trả về file gốc Adobe.' -f $baks.Count))
+    }
+    if ($hashes.Count -gt 0) {
+        $score -= 30
+        $hashNames = ($hashes | ForEach-Object { ($_ -replace '^HashMismatch:\s*', '') | Split-Path -Leaf } | Select-Object -Unique) -join ', '
+        $lines.Add(('- [CẢNH BÁO QUÉT] Phát hiện {0} file đã bị sửa byte (HashMismatch, mất .bak): {1} -> Adobe Genuine Service sẽ phát hiện. Khuyến nghị vào Tab 5 (Gỡ cài đặt tận gốc) gỡ app này và cài lại bản sạch.' -f $hashes.Count, $hashNames))
+    }
+
+    $tokCount = @($Diag.DeviceTokens).Count
+    if ($tokCount -gt 2) {
+        $score -= 20
+        $lines.Add(('- [Xung đột Token] Có tới {0} device_token trong Credential Manager (nhiều tài khoản cũ chồng chéo) -> Vào Tab 2 (Sửa lỗi đăng nhập) để dọn sạch token cũ.' -f $tokCount))
+    } else {
+        $lines.Add(('- [Giấy phép đăng nhập] Ổn định ({0} device_token, không bị chồng chéo nhiều tài khoản cũ).' -f $tokCount))
+    }
+
+    if ($score -lt 0) { $score = 0 }
+    if ($baks.Count -eq 0 -and $hashes.Count -eq 0 -and $hn -eq 0 -and $Diag.ImsReachable) {
+        $lines.Add('- [Toàn vẹn chữ ký số & Mạng] 100% file Adobe nguyên bản, kết nối máy chủ Adobe thông suốt, an toàn tuyệt đối cho tài khoản bản quyền.')
+    }
+
+    $grade = if ($score -ge 85) { 'TỐT - MÔI TRƯỜNG SẠCH' } elseif ($score -ge 60) { 'CẦN LƯU Ý / DỌN NHẸ' } else { 'NGUY CƠ XUNG ĐỘT / BỊ QUÉT CAO' }
+    $header = '=== ĐÁNH GIÁ KỸ THUẬT: {0}/100 ({1}) ===' -f $score, $grade
+    return ($header + "
+" + ($lines -join "
+"))
 }
 
 function Export-Report {
@@ -748,7 +805,7 @@ function Invoke-LeftoverClean {
             $file = Join-Path $bk ('reg{0:D4}.reg' -f $n)
             $sub  = 'HKCU\' + $t.Path.Substring(5)
             reg export $sub $file /y 2>$null | Out-Null
-            if (Test-Path $file) { reg delete $sub /f 2>$null | Out-Null; Save-BackupRecord -SessionDir $SessionDir -Kind 'Reg' -Source $($t.Path) -BackupPath $file; Write-Log "Deleted $($t.Path) (backup $file)" }
+            if (Test-Path $file) { Remove-Item -LiteralPath ('Registry::HKEY_CURRENT_USER\' + $t.Path.Substring(5)) -Recurse -Force -ErrorAction SilentlyContinue; Save-BackupRecord -SessionDir $SessionDir -Kind 'Reg' -Source $($t.Path) -BackupPath $file; Write-Log "Deleted $($t.Path) (backup $file)" }
             else { Write-Log "Export failed, left in place: $($t.Path)" 'WARN' }
         } else {
             if (-not (Test-SafeToRemove $t.Path)) { Write-Log "Refused folder: $($t.Path)" 'WARN'; continue }
