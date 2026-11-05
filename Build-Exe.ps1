@@ -54,7 +54,12 @@ Remove-Item -LiteralPath (Join-Path $dist 'AdobeToolkit.old.exe') -Force -ErrorA
 # ==============================================================================
 $cleanExe = Join-Path $dist 'AdobeToolkit_Clean.exe'
 if (Test-Path -LiteralPath $cleanExe) {
-    try { Remove-Item -LiteralPath $cleanExe -Force -ErrorAction Stop } catch { }
+    try { Remove-Item -LiteralPath $cleanExe -Force -ErrorAction Stop }
+    catch {
+        $oldClean = Join-Path $dist 'AdobeToolkit_Clean.old.exe'
+        Remove-Item -LiteralPath $oldClean -Force -ErrorAction SilentlyContinue
+        Rename-Item -LiteralPath $cleanExe -NewName 'AdobeToolkit_Clean.old.exe' -Force -ErrorAction SilentlyContinue
+    }
 }
 
 $manifestPath = Join-Path $here 'app.manifest'
