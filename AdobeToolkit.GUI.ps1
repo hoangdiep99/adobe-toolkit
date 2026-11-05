@@ -274,15 +274,15 @@ $btnDiag = New-Btn $p1 'Chạy chẩn đoán' 0 150 $true
 $btnSave = New-Btn $p1 'Lưu báo cáo (JSON)' 160 175
 $btnKill1 = New-Btn $p1 'Đóng tiến trình Adobe' 345 185
 $list1 = New-List $p1 @(@('Hạng mục', 235), @('Kết quả', 120), @('Chi tiết', 440))
-$list1.Height = $p1.Height - 252
-$evalCap = New-Object Windows.Forms.Label; $evalCap.Left = 0; $evalCap.Top = $p1.Height - 118; $evalCap.Width = 760; $evalCap.Height = 20
-$evalCap.Font = $fSub; $evalCap.ForeColor = $cAccent; $evalCap.Anchor = 'Bottom,Left,Right'
+$list1.Height = 235; $list1.Anchor = 'Top,Left,Right'
+$evalCap = New-Object Windows.Forms.Label; $evalCap.Left = 0; $evalCap.Top = 368; $evalCap.Width = 760; $evalCap.Height = 20
+$evalCap.Font = $fSub; $evalCap.ForeColor = $cAccent; $evalCap.Anchor = 'Top,Left,Right'
 $evalCap.Text = '📊 Phân tích kỹ thuật & Khuyến nghị xử lý (Tự động chấm điểm Offline - Không cần API):'
 $p1.Controls.Add($evalCap)
 $evalBox = New-Object Windows.Forms.TextBox
 $evalBox.Multiline = $true; $evalBox.ReadOnly = $true; $evalBox.ScrollBars = 'Vertical'
-$evalBox.Left = 0; $evalBox.Top = $p1.Height - 96; $evalBox.Width = $p1.Width; $evalBox.Height = 92
-$evalBox.Anchor = 'Bottom,Left,Right'; $evalBox.Font = $fMono; $evalBox.BackColor = [Drawing.Color]::FromArgb(255, 251, 235)
+$evalBox.Left = 0; $evalBox.Top = 390; $evalBox.Width = $p1.Width; $evalBox.Height = $p1.Height - 396
+$evalBox.Anchor = 'Top,Left,Right,Bottom'; $evalBox.Font = $fMono; $evalBox.BackColor = [Drawing.Color]::FromArgb(255, 251, 235)
 $evalBox.ForeColor = [Drawing.Color]::FromArgb(31, 41, 55); $evalBox.BorderStyle = 'FixedSingle'
 $evalBox.Text = 'Bấm "Chạy chẩn đoán" để hệ thống phân tích chữ ký số, token đăng nhập và đưa ra khuyến nghị kỹ thuật chi tiết...'
 $p1.Controls.Add($evalBox)
