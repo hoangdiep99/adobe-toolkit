@@ -1051,6 +1051,8 @@ function Invoke-IntegrityRepair {
             'BakFile' {
                 if (Test-Path -LiteralPath $it.BakPath) {
                     if (Test-Path -LiteralPath $it.Target) {
+                        try { [System.IO.File]::SetAttributes($it.Target, [System.IO.FileAttributes]::Normal) } catch { }
+                        attrib.exe -r -h -s $it.Target 2>$null | Out-Null
                         $patchedCopy = Join-Path $bk ("patched_{0:D4}_{1}" -f $n, (Split-Path $it.Target -Leaf))
                         Copy-Item -LiteralPath $it.Target -Destination $patchedCopy -Force
                         Save-BackupRecord -SessionDir $SessionDir -Kind 'FileOverwrite' -Source $it.Target -BackupPath $patchedCopy
@@ -1067,7 +1069,27 @@ function Invoke-IntegrityRepair {
                 $cleanLines = Get-Content -LiteralPath $it.Target | Where-Object {
                     $_ -match '^\s*#' -or $_ -notmatch 'adobe|adobelogin|adobe\.io|adobe\.com|typekit|behance'
                 }
-                Set-Content -LiteralPath $it.Target -Value $cleanLines -Encoding ASCII
+
+                # Unlock file attributes if ReadOnly / System / Hidden was set by blocker tools
+                try {
+                    if (Test-Path -LiteralPath $it.Target) {
+                        [System.IO.File]::SetAttributes($it.Target, [System.IO.FileAttributes]::Normal)
+                    }
+                } catch { }
+                attrib.exe -r -h -s $it.Target 2>$null | Out-Null
+
+                # Reset ACL if write permission was denied by blocker tools
+                try {
+                    takeown.exe /f $it.Target /a 2>$null | Out-Null
+                    icacls.exe $it.Target /grant "*S-1-5-32-544:F" "*S-1-5-18:F" /c /q 2>$null | Out-Null
+                } catch { }
+
+                try {
+                    Set-Content -LiteralPath $it.Target -Value $cleanLines -Encoding ASCII -Force -ErrorAction Stop
+                } catch {
+                    [System.IO.File]::WriteAllLines($it.Target, [string[]]$cleanLines, [System.Text.Encoding]::ASCII)
+                }
+                ipconfig.exe /flushdns 2>$null | Out-Null
                 Write-Log "Cleaned Adobe block lines from hosts file"
             }
             'FirewallBlock' {
@@ -1171,6 +1193,12 @@ function Restore-BackupSession {
                 }
                 'FileOverwrite' {
                     if (Test-Path -LiteralPath $e.BackupPath) {
+                        try {
+                            if (Test-Path -LiteralPath $e.Source) {
+                                [System.IO.File]::SetAttributes($e.Source, [System.IO.FileAttributes]::Normal)
+                            }
+                        } catch { }
+                        attrib.exe -r -h -s $e.Source 2>$null | Out-Null
                         Copy-Item -LiteralPath $e.BackupPath -Destination $e.Source -Force
                         Write-Log "Restored file: $($e.Source)"
                         $restored++
