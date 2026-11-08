@@ -29,7 +29,7 @@ $script:CoreFnNames = @(
     'Get-AdobeCredentialTargets', 'Initialize-Win32Cred', 'ConvertFrom-AppInfoName', 'Get-FriendlyAppName',
     'Get-SignInGroups', 'Get-ProdInstallListXml', 'Get-EmbeddedLeftoverCatalog', 'Get-TokenMap', 'Test-SafeToRemove',
     'Get-SharedComponentPatterns', 'Test-InUse', 'Test-SafeRegistryKey',
-    'Get-LeftoverTargets', 'Get-IntegrityIssues', 'Invoke-IntegrityRepair', 'Save-HostsContent', 'Get-AppRelatedPaths', 'Invoke-DeepUninstallApps', 'Invoke-WipeAllAdobeTraces', 'Get-BackupSessions', 'Save-BackupRecord', 'Invoke-ManualBackup'
+    'Get-LeftoverTargets', 'Get-IntegrityIssues', 'Invoke-IntegrityRepair', 'Save-HostsContent', 'Get-BlockedAdobeCerts', 'Get-AdobeIfeoHijacks', 'Unlock-AndRemoveFolder', 'Invoke-DeepLicenseRepair', 'Get-AppRelatedPaths', 'Invoke-DeepUninstallApps', 'Invoke-WipeAllAdobeTraces', 'Get-BackupSessions', 'Save-BackupRecord', 'Invoke-ManualBackup'
 )
 $script:CoreInitScript = "Set-StrictMode -Version 2; `$script:LogFile = `$null;`r`n" + (
     ($script:CoreFnNames | ForEach-Object {
@@ -589,6 +589,12 @@ $btnDiag.Add_Click({
             Add-Row $list1 @('Tường lửa chặn Adobe', $(if ($fwn) { "⚠ $fwn rule" } else { '✔ Không' }), $(if ($fwn) { ($d.FirewallBlocks -join ' | ') } else { 'Không có rule chặn kết nối.' })) $(if ($fwn) { $cWarn } else { $cOk })
             Add-Row $list1 @('Proxy hệ thống', $(if ($d.WinHttpProxy -eq 'direct') { '✔ Trực tiếp' } else { '⚠ Có proxy' }), [string]$d.WinHttpProxy) $(if ($d.WinHttpProxy -eq 'direct') { $cOk } else { $cWarn })
             Add-Row $list1 @('Kết nối máy chủ đăng nhập Adobe', $(if ($d.ImsReachable) { '✔ Được' } else { '⚠ Không' }), 'ims-na1.adobelogin.com : 443') $(if ($d.ImsReachable) { $cOk } else { $cWarn })
+            $licOk = if ($d.PSObject.Properties['LicensingReachable']) { [bool]$d.LicensingReachable } else { $d.ImsReachable }
+            Add-Row $list1 @('Kết nối máy chủ cấp phép (License)', $(if ($licOk) { '✔ Được' } else { '❌ Bị chặn' }), 'lm.licenses.adobe.com : 443 (Xác thực bản quyền)') $(if ($licOk) { $cOk } else { $cDanger })
+            $disC = if ($d.PSObject.Properties['DisallowedCerts']) { @($d.DisallowedCerts).Count } else { 0 }
+            Add-Row $list1 @('Chứng chỉ cấm (Disallowed)', $(if ($disC) { "⚠ $disC cert" } else { '✔ Sạch' }), $(if ($disC) { "Phát hiện $disC chứng chỉ Adobe bị chặn SSL trong Windows!" } else { 'Không có chứng chỉ Adobe trong Disallowed.' })) $(if ($disC) { $cDanger } else { $cOk })
+            $ifeoC = if ($d.PSObject.Properties['IfeoHijacks']) { @($d.IfeoHijacks).Count } else { 0 }
+            Add-Row $list1 @('Chuyển hướng IFEO Debugger', $(if ($ifeoC) { "⚠ $ifeoC app" } else { '✔ Không' }), $(if ($ifeoC) { (($d.IfeoHijacks | ForEach-Object { "$($_.ExeName)" }) -join ', ') + ' bị chuyển hướng!' } else { 'Không có khoá chuyển hướng nào.' })) $(if ($ifeoC) { $cDanger } else { $cOk })
             $pn = @($d.AdobeProcesses).Count
             Add-Row $list1 @('App Adobe đang mở', $(if ($pn) { '⚠ Có' } else { '✔ Không' }), $(if ($pn) { ($d.AdobeProcesses -join ', ') } else { '' })) $(if ($pn) { $cWarn } else { $cOk })
             $tn = @($d.TamperedFiles).Count
@@ -627,7 +633,12 @@ $btnScan2  = New-Btn $p2 'Quét' 0 90 $true
 $btnLr     = New-Btn $p2 'Chỉ Lightroom' 100 130
 $btnAll    = New-Btn $p2 'Chọn tất cả' 240 120
 $btnNone   = New-Btn $p2 'Bỏ chọn' 370 100
-$btnApply2 = New-Btn $p2 'Dọn app đã chọn' 480 170; $btnApply2.Enabled = $false
+$btnApply2 = New-Btn $p2 'Dọn app đã chọn' 480 160; $btnApply2.Enabled = $false
+$btnDeepLicense = New-Btn $p2 '⚡ Sửa triệt để lỗi bản quyền' 650 250
+$btnDeepLicense.BackColor = [Drawing.Color]::FromArgb(220, 38, 38)
+$btnDeepLicense.ForeColor = 'White'
+$btnDeepLicense.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(220, 38, 38)
+$btnDeepLicense.Font = $fSub
 
 $apps = New-List $p2 @(@('Ứng dụng', 230), @('Mục đăng nhập', 115), @('Thư mục', 75), @('Ảnh hưởng', 370))
 $apps.CheckBoxes = $true; $apps.Height = 168; $apps.Anchor = 'Top,Left,Right'
@@ -698,6 +709,43 @@ $apps.Add_ItemChecked({ Update-Detail })
 $btnLr.Add_Click({ Set-AppChecks { param($g) $g.Key -eq 'app:LightroomClassic' } })
 $btnAll.Add_Click({ Set-AppChecks { param($g) $true } })
 $btnNone.Add_Click({ Set-AppChecks { param($g) $false } })
+$btnDeepLicense.Add_Click({
+    $msg = "⚡ TÍNH NĂNG ĐẶC TRỊ: KHẮC PHỤC LỖI BẢN QUYỀN CỨNG ĐẦU`n`n" +
+           "Dành riêng cho trường hợp: 'Tài khoản vẫn còn gói nhưng app cứ báo Unlicensed / Non-genuine / Hết hạn' mà các cách gỡ thông thường không hết.`n`n" +
+           "Hệ thống sẽ tự động thực hiện 7 thao tác tầng sâu:`n" +
+           "1. Cưỡng chế mở quyền NTFS & dọn sạch SLStore, SLCache, PCD, AGS`n" +
+           "2. Gỡ bỏ chứng chỉ Adobe bị gài vào Untrusted Certificates (Disallowed)`n" +
+           "3. Xoá khoá chuyển hướng IFEO Debugger trong Registry`n" +
+           "4. Dọn sạch file hosts & tắt mọi rule tường lửa chặn kết nối`n" +
+           "5. Cấp lại quyền chuẩn cho MachineKeys RSA Cryptography`n" +
+           "6. Reset WinHTTP proxy & làm mới hoàn toàn bộ nhớ cache DNS`n" +
+           "7. Dọn sạch phiên đăng nhập kẹt trong OOBE & Credential Manager`n`n" +
+           "Sau khi hoàn tất, bạn chỉ cần mở Creative Cloud đăng nhập lại tài khoản có gói.`n`n" +
+           "Bạn có muốn bắt đầu xử lý ngay không?"
+    if (-not (Ask $msg)) { return }
+
+    Start-AsyncScan -CommandText 'Invoke-DeepLicenseRepair' -TriggerButton $btnDeepLicense -StatusText 'Đang cưỡng chế mở quyền SLStore, dọn chứng chỉ, reset mạng & cấp phép...' -OnSuccess {
+        param($res)
+        $r = $res | Select-Object -First 1
+        $summary = "HOÀN TẤT XỬ LÝ TRIỆT ĐỂ BẢN QUYỀN!`n`n" +
+                   "- Thư mục bản quyền đã dọn sạch: $($r.LicensingFoldersWiped)`n" +
+                   "- Chứng chỉ Adobe gỡ khỏi Disallowed: $($r.CertsUnblocked)`n" +
+                   "- Chuyển hướng IFEO đã xoá: $($r.IfeoCleaned)`n" +
+                   "- File hosts làm sạch: $(if ($r.HostsCleaned) { 'Đã dọn' } else { 'Không có' })`n" +
+                   "- Rule tường lửa đã tắt: $($r.FirewallDisabled)`n" +
+                   "- Quyền MachineKeys RSA: $(if ($r.MachineKeysAclFixed) { 'Đã khôi phục' } else { 'Bình thường' })`n" +
+                   "- WinHTTP Proxy & DNS: Đã làm mới`n" +
+                   "- Token đăng nhập OOBE: Đã dọn sạch ($($r.CredentialsWiped) creds, $($r.OobeWiped) folders)`n`n" +
+                   "👉 BÂY GIỜ BẠN CHỈ CẦN:`n" +
+                   "1. Mở Creative Cloud Desktop.`n" +
+                   "2. Đăng nhập tài khoản có gói (lưu ý chọn đúng Hồ sơ Công ty / Team nếu có).`n" +
+                   "3. Mở Photoshop/Lightroom sử dụng bình thường!"
+        Say "Hoàn tất xử lý triệt để bản quyền cứng đầu. Sao lưu tại: $($script:session)"
+        Info $summary 'Khắc phục triệt để bản quyền thành công'
+        if ($btnScan2.Enabled) { & $btnScan2.PerformClick() }
+    }
+})
+
 $btnApply2.Add_Click({
     $sel = @($apps.CheckedItems | ForEach-Object { $_.Tag })
     if (-not $sel.Count) { Info 'Chưa chọn app nào.'; return }

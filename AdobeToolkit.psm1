@@ -369,14 +369,71 @@ function Get-AdobeFirewallBlockRules {
 }
 
 function Test-ImsTcpFast {
+    param([string]$HostName = 'ims-na1.adobelogin.com', [int]$Port = 443)
     $tcp = New-Object System.Net.Sockets.TcpClient
     try {
-        $ar = $tcp.BeginConnect('ims-na1.adobelogin.com', 443, $null, $null)
+        $ar = $tcp.BeginConnect($HostName, $Port, $null, $null)
         return ($ar.AsyncWaitHandle.WaitOne(1800, $false) -and $tcp.Connected)
     } catch {
         return $false
     } finally {
         try { $tcp.Close() } catch { }
+    }
+}
+
+function Get-BlockedAdobeCerts {
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($store in 'Cert:\LocalMachine\Disallowed', 'Cert:\CurrentUser\Disallowed') {
+        if (Test-Path -LiteralPath $store) {
+            foreach ($c in (Get-ChildItem -Path $store -ErrorAction SilentlyContinue)) {
+                if ($c.Subject -match 'Adobe' -or $c.Issuer -match 'Adobe' -or $c.FriendlyName -match 'Adobe') {
+                    $out.Add([pscustomobject]@{
+                        Thumbprint = $c.Thumbprint
+                        Subject    = $c.Subject
+                        Issuer     = $c.Issuer
+                        StorePath  = $c.PSPath
+                    })
+                }
+            }
+        }
+    }
+    $out.ToArray()
+}
+
+function Get-AdobeIfeoHijacks {
+    $out = New-Object System.Collections.Generic.List[object]
+    $ifeoBase = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options'
+    $adNames = @('AdobeGenuineClient.exe', 'AGSService.exe', 'AGMService.exe', 'AdobeDesktopService.exe', 'CCXProcess.exe', 'Photoshop.exe', 'Illustrator.exe', 'Creative Cloud.exe', 'AAM Updates Notifier.exe')
+    foreach ($name in $adNames) {
+        $p = Join-Path $ifeoBase $name
+        if (Test-Path -LiteralPath $p) {
+            $dbg = (Get-ItemProperty -LiteralPath $p -Name 'Debugger' -ErrorAction SilentlyContinue).Debugger
+            if ($dbg) {
+                $out.Add([pscustomobject]@{
+                    ExeName  = $name
+                    Debugger = $dbg
+                    KeyPath  = $p
+                })
+            }
+        }
+    }
+    $out.ToArray()
+}
+
+function Unlock-AndRemoveFolder {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    try {
+        attrib.exe -r -h -s "$Path\*.*" /s /d 2>$null | Out-Null
+        attrib.exe -r -h -s $Path 2>$null | Out-Null
+    } catch { }
+    try { takeown.exe /f $Path /r /d y 2>$null | Out-Null } catch { }
+    try { icacls.exe $Path /grant "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" /t /c /q 2>$null | Out-Null } catch { }
+    try {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+        return $true
+    } catch {
+        try { [System.IO.Directory]::Delete($Path, $true); return $true } catch { return $false }
     }
 }
 
@@ -443,7 +500,10 @@ function Get-Diagnostics {
     $r.StateFolders = @(Get-SignInFolders | ForEach-Object { $_ })
     $r.LicensingFolders = @('C:\ProgramData\Adobe\SLStore', 'C:\ProgramData\Adobe\SLCache') | Where-Object { Test-Path -LiteralPath $_ }
 
-    $r.ImsReachable = Test-ImsTcpFast
+    $r.ImsReachable = Test-ImsTcpFast 'ims-na1.adobelogin.com'
+    $r.LicensingReachable = Test-ImsTcpFast 'lm.licenses.adobe.com'
+    $r.DisallowedCerts = @(Get-BlockedAdobeCerts)
+    $r.IfeoHijacks = @(Get-AdobeIfeoHijacks)
     [pscustomobject]$r
 }
 
@@ -457,7 +517,23 @@ function Get-TechnicalEvaluation {
         $score -= 10
         $lines.Add('- [Quản trị] Chưa chạy quyền Admin -> Không thể khôi phục file trong Program Files hoặc sửa hosts.')
     }
-    if (-not $Diag.ImsReachable) {
+    if (-not $Diag.ImsReachable) {
+        $score -= 30
+        $lines.Add('- [Mạng Đăng nhập] Mất kết nối tới máy chủ đăng nhập Adobe (ims-na1.adobelogin.com:443) -> Không thể đăng nhập tài khoản.')
+    }
+    if ($Diag.PSObject.Properties['LicensingReachable'] -and (-not $Diag.LicensingReachable)) {
+        $score -= 35
+        $lines.Add('- [🚨 MÁY CHỦ BẢN QUYỀN BỊ CHẶN] Không thể kết nối tới máy chủ cấp phép (lm.licenses.adobe.com:443) -> TÀI KHOẢN CÓ GÓI VẪN SẼ BÁO UNLICENSED! Vào Tab 2 bấm "⚡ Sửa triệt để lỗi bản quyền cứng đầu" để mở khoá ngay.')
+    }
+    if ($Diag.PSObject.Properties['DisallowedCerts'] -and @($Diag.DisallowedCerts).Count -gt 0) {
+        $score -= 30
+        $lines.Add(('- [🚨 CHỨNG CHỈ CẤM] Phát hiện {0} chứng chỉ Adobe bị gài vào Untrusted Certificates (Disallowed) -> Windows từ chối xác thực SSL của Adobe. Bấm "⚡ Sửa triệt để lỗi bản quyền cứng đầu" ở Tab 2 để gỡ bỏ.' -f @($Diag.DisallowedCerts).Count))
+    }
+    if ($Diag.PSObject.Properties['IfeoHijacks'] -and @($Diag.IfeoHijacks).Count -gt 0) {
+        $score -= 25
+        $lines.Add(('- [🚨 CHUYỂN HƯỚNG IFEO] Phát hiện {0} tiến trình Adobe bị gài Debugger chuyển hướng trong Registry -> Vào Tab 2 bấm "⚡ Sửa triệt để lỗi bản quyền cứng đầu" để xoá bỏ.' -f @($Diag.IfeoHijacks).Count))
+    }
+    if ($false) {
         $score -= 30
         $lines.Add('- [Mạng] Mất kết nối tới máy chủ xác thực Adobe (ims-na1.adobelogin.com:443) -> Bản quyền chính hãng sẽ báo mất quyền truy cập.')
     }
@@ -1032,6 +1108,49 @@ function Get-IntegrityIssues {
         })
     }
 
+    # 5. Check Blocked Adobe Certificates in Disallowed store
+    foreach ($bc in (Get-BlockedAdobeCerts)) {
+        $issues.Add([pscustomobject]@{
+            Kind    = 'BlockedCert'
+            CanFix  = $true
+            Label   = 'Chứng chỉ bị cấm'
+            Display = $bc.Subject
+            Target  = $bc.StorePath
+            BakPath = $bc.StorePath
+            Note    = 'Chứng chỉ Adobe bị ném vào Disallowed (Untrusted) -> Windows từ chối xác thực bản quyền SSL'
+        })
+    }
+
+    # 6. Check IFEO Debugger Hijacks
+    foreach ($hj in (Get-AdobeIfeoHijacks)) {
+        $issues.Add([pscustomobject]@{
+            Kind    = 'IfeoHijack'
+            CanFix  = $true
+            Label   = 'Chuyển hướng IFEO'
+            Display = ("{0} -> {1}" -f $hj.ExeName, $hj.Debugger)
+            Target  = $hj.KeyPath
+            BakPath = ''
+            Note    = 'Xoá giá trị Debugger chuyển hướng tiến trình trong Registry IFEO'
+        })
+    }
+
+    # 7. Check Locked / Tampered SLStore
+    $slPath = "$env:ProgramData\Adobe\SLStore"
+    if (Test-Path -LiteralPath $slPath) {
+        $slFiles = @(Get-ChildItem -Path $slPath -Force -ErrorAction SilentlyContinue)
+        if ($slFiles.Count -gt 0) {
+            $issues.Add([pscustomobject]@{
+                Kind    = 'LockedSLStore'
+                CanFix  = $true
+                Label   = 'Cơ sở dữ liệu SLStore'
+                Display = "$slPath ($($slFiles.Count) file/token)"
+                Target  = $slPath
+                BakPath = ''
+                Note    = 'Cưỡng chế mở quyền & dọn dẹp token bản quyền cũ/bị khoá để nạp bản quyền mới'
+            })
+        }
+    }
+
     $issues.ToArray()
 }
 
@@ -1115,6 +1234,27 @@ function Invoke-IntegrityRepair {
                 Save-HostsContent -Content ($cleanLines -join "`r`n") -SessionDir $SessionDir | Out-Null
                 Write-Log "Cleaned Adobe block lines from hosts file"
             }
+            'BlockedCert' {
+                try {
+                    Remove-Item -LiteralPath $it.Target -Force -ErrorAction SilentlyContinue
+                    Write-Log "Removed blocked Adobe certificate: $($it.Display)"
+                } catch { }
+            }
+            'IfeoHijack' {
+                try {
+                    Remove-ItemProperty -LiteralPath $it.Target -Name 'Debugger' -Force -ErrorAction SilentlyContinue
+                    Write-Log "Removed IFEO Debugger hijack: $($it.Display)"
+                } catch { }
+            }
+            'LockedSLStore' {
+                try {
+                    $slBk = Join-Path $bk 'SLStore_backup'
+                    Copy-Item -LiteralPath $it.Target -Destination $slBk -Recurse -Force -ErrorAction SilentlyContinue
+                    Save-BackupRecord -SessionDir $SessionDir -Kind 'Folder' -Source $it.Target -BackupPath $slBk
+                    Unlock-AndRemoveFolder -Path $it.Target | Out-Null
+                    Write-Log "Force-unlocked and cleaned SLStore: $($it.Target)"
+                } catch { }
+            }
             'FirewallBlock' {
                 $fw = New-Object -ComObject HNetCfg.FwPolicy2; foreach($rule in $fw.Rules){ if($rule.Name -eq $it.Target -and $rule.Action -eq 0){ $rule.Enabled = $false } }
                 Save-BackupRecord -SessionDir $SessionDir -Kind 'FirewallDisable' -Source $it.Target -BackupPath $it.Display
@@ -1307,4 +1447,185 @@ function Invoke-ManualBackup {
     return $dir
 }
 
+function Invoke-DeepLicenseRepair {
+    <# Xử lý triệt để lỗi bản quyền cứng đầu (báo hết hạn / Unlicensed dù tài khoản còn gói):
+       1. Cưỡng chế mở quyền & dọn sạch SLStore / SLCache / Adobe PCD
+       2. Gỡ bỏ chứng chỉ Adobe bị cấm trong Windows Untrusted Certificates (Disallowed)
+       3. Xoá khoá chuyển hướng IFEO Debugger trong Registry
+       4. Dọn sạch file hosts & tắt mọi rule tường lửa chặn Adobe
+       5. Cấp lại quyền chuẩn cho MachineKeys RSA
+       6. Reset WinHTTP proxy & làm mới DNS cache
+       7. Đăng xuất token kẹt trong OOBE / Credential Manager #>
+    [CmdletBinding()]
+    param([string]$SessionDir)
+    Write-Log "=== STARTING DEEP LICENSE & INTEGRITY REPAIR (SUA TRIET DE BAN QUYEN) ==="
+
+    if (-not $SessionDir) { $SessionDir = Initialize-Session }
+    $bk = Join-Path $SessionDir 'backup-deep-license'
+    New-Item -ItemType Directory -Force -Path $bk | Out-Null
+
+    $report = [ordered]@{
+        ProcessesStopped      = 0
+        ServicesStopped       = 0
+        TasksRemoved          = 0
+        LicensingFoldersWiped = 0
+        MachineKeysAclFixed   = $false
+        CertsUnblocked        = 0
+        IfeoCleaned           = 0
+        HostsCleaned          = $false
+        FirewallDisabled      = 0
+        WinHttpProxyReset     = $false
+        DnsFlushed            = $false
+        CredentialsWiped      = 0
+        OobeWiped             = 0
+    }
+
+    # 1. Stop all Adobe processes
+    $busy = @(Get-AdobeBusyProcesses)
+    if ($busy.Count -gt 0) {
+        $null = Stop-AdobeProcesses
+        $report.ProcessesStopped = $busy.Count
+    }
+
+    # 2. Stop & Disable Adobe Genuine Service (AGSService, AGMService)
+    foreach ($svcName in 'AGSService', 'AGMService', 'AdobeARMservice', 'AdobeUpdateService') {
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if ($svc) {
+            try {
+                Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
+                Set-Service -Name $svcName -StartupType Disabled -ErrorAction SilentlyContinue
+                $report.ServicesStopped++
+                Write-Log "Stopped & disabled service: $svcName"
+            } catch { }
+        }
+    }
+
+    # 3. Remove Adobe Genuine Scheduled Tasks
+    try {
+        foreach ($t in (Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match 'Adobe' -or $_.TaskPath -match 'Adobe' })) {
+            if ($t.TaskName -match 'Genuine|Integrity|GCInvoker') {
+                Unregister-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -Confirm:$false -ErrorAction SilentlyContinue
+                $report.TasksRemoved++
+                Write-Log "Removed task: $($t.TaskName)"
+            }
+        }
+    } catch { }
+
+    # 4. Force-Unlock & Wipe stubborn licensing directories (SLStore, SLCache, PCD, AGS cache)
+    $licFolders = @(
+        "$env:ProgramData\Adobe\SLStore",
+        "$env:ProgramData\Adobe\SLCache",
+        "${env:ProgramFiles(x86)}\Common Files\Adobe\SLCache",
+        "$env:ProgramData\Adobe\Adobe PCD",
+        "$env:ProgramData\Adobe\OperatingEnvironment",
+        "$env:ProgramData\Adobe\AdobeGenuineService",
+        "${env:ProgramFiles(x86)}\Common Files\Adobe\Adobe Genuine Service"
+    )
+    foreach ($lf in $licFolders) {
+        if (Test-Path -LiteralPath $lf) {
+            $bDest = Join-Path $bk ($lf -replace '[:\\]', '_')
+            try { Copy-Item -LiteralPath $lf -Destination $bDest -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+            
+            if (Unlock-AndRemoveFolder -Path $lf) {
+                $report.LicensingFoldersWiped++
+                Write-Log "Force-unlocked & wiped licensing folder: $lf"
+            }
+        }
+    }
+
+    # 5. Fix MachineKeys ACL
+    $machineKeysPath = "$env:ProgramData\Microsoft\Crypto\RSA\MachineKeys"
+    if (Test-Path -LiteralPath $machineKeysPath) {
+        try {
+            takeown.exe /f $machineKeysPath /a 2>$null | Out-Null
+            icacls.exe $machineKeysPath /grant "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "Everyone:(R,W)" /c /q 2>$null | Out-Null
+            $report.MachineKeysAclFixed = $true
+            Write-Log "Fixed MachineKeys ACL permissions"
+        } catch { }
+    }
+
+    # 6. Unblock Adobe certificates from Disallowed store
+    $blockedCerts = @(Get-BlockedAdobeCerts)
+    foreach ($bc in $blockedCerts) {
+        try {
+            Remove-Item -LiteralPath $bc.StorePath -Force -ErrorAction SilentlyContinue
+            $report.CertsUnblocked++
+            Write-Log "Removed blocked Adobe cert from Disallowed: $($bc.Subject)"
+        } catch { }
+    }
+
+    # 7. Clean IFEO Debugger Hijacks
+    $hijacks = @(Get-AdobeIfeoHijacks)
+    foreach ($hj in $hijacks) {
+        try {
+            Remove-ItemProperty -LiteralPath $hj.KeyPath -Name 'Debugger' -Force -ErrorAction SilentlyContinue
+            $report.IfeoCleaned++
+            Write-Log "Removed IFEO Debugger hijack for: $($hj.ExeName)"
+        } catch { }
+    }
+
+    # 8. Clean Hosts file (Remove all Adobe block lines)
+    $hostsPath = "$env:SystemRoot\System32\drivers\etc\hosts"
+    if (Test-Path -LiteralPath $hostsPath) {
+        $cleanLines = Get-Content -LiteralPath $hostsPath | Where-Object {
+            $_ -match '^\s*#' -or $_ -notmatch 'adobe|adobelogin|adobe\.io|adobe\.com|typekit|behance'
+        }
+        Save-HostsContent -Content ($cleanLines -join "`r`n") -SessionDir $SessionDir | Out-Null
+        $report.HostsCleaned = $true
+        Write-Log "Cleaned Adobe block lines from hosts file"
+    }
+
+    # 9. Disable all Adobe-blocking Firewall Rules (including by ApplicationName)
+    try {
+        $fw = New-Object -ComObject HNetCfg.FwPolicy2
+        foreach ($r in $fw.Rules) {
+            if ($r.Enabled -and $r.Action -eq 0) {
+                $app = $null; try { $app = $r.ApplicationName } catch { }
+                if ($r.Name -match 'Adobe|Lightroom|Photoshop|Illustrator|Premiere|AfterFX|CCX|Creative|GenP|Unlicensed' -or ($app -and $app -match 'Adobe')) {
+                    $r.Enabled = $false
+                    $report.FirewallDisabled++
+                    Write-Log "Disabled block rule: $($r.Name)"
+                }
+            }
+        }
+    } catch { }
+
+    # 10. Reset WinHTTP Proxy
+    try {
+        netsh.exe winhttp reset proxy 2>$null | Out-Null
+        $report.WinHttpProxyReset = $true
+        Write-Log "Reset WinHTTP proxy to Direct"
+    } catch { }
+
+    # 11. Flush DNS cache
+    try {
+        ipconfig.exe /flushdns 2>$null | Out-Null
+        nbtstat.exe -R 2>$null | Out-Null
+        $report.DnsFlushed = $true
+        Write-Log "Flushed DNS cache and NetBIOS cache"
+    } catch { }
+
+    # 12. Wipe stale OOBE & Credentials
+    Initialize-Win32Cred
+    foreach ($c in (Get-AdobeCredentialTargets)) {
+        if ([AdobeWin32Cred]::DeleteTarget($c)) {
+            $report.CredentialsWiped++
+            Write-Log "Wiped credential: $c"
+        }
+    }
+
+    $oobeDirs = @("$env:LOCALAPPDATA\Adobe\OOBE", "$env:APPDATA\Adobe\OOBE")
+    foreach ($od in $oobeDirs) {
+        if (Test-Path -LiteralPath $od) {
+            if (Unlock-AndRemoveFolder -Path $od) {
+                $report.OobeWiped++
+                Write-Log "Wiped OOBE folder: $od"
+            }
+        }
+    }
+
+    Write-Log "=== DEEP LICENSE & INTEGRITY REPAIR COMPLETE ==="
+    return [pscustomobject]$report
+}
+
 Export-ModuleMember -Function *
