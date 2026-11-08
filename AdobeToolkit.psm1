@@ -1035,6 +1035,52 @@ function Get-IntegrityIssues {
     $issues.ToArray()
 }
 
+function Save-HostsContent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Content,
+        [string]$SessionDir
+    )
+    $hostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+
+    # Backup hosts file if session directory is provided
+    if ($SessionDir -and (Test-Path -LiteralPath $hostsPath)) {
+        $bkDir = Join-Path $SessionDir 'backup-integrity'
+        if (-not (Test-Path -LiteralPath $bkDir)) { New-Item -ItemType Directory -Force -Path $bkDir | Out-Null }
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $hostsBak = Join-Path $bkDir "hosts_$stamp.bak"
+        Copy-Item -LiteralPath $hostsPath -Destination $hostsBak -Force -ErrorAction SilentlyContinue
+        Save-BackupRecord -SessionDir $SessionDir -Kind 'FileOverwrite' -Source $hostsPath -BackupPath $hostsBak
+    }
+
+    # Unlock attributes (ReadOnly, Hidden, System)
+    try {
+        if (Test-Path -LiteralPath $hostsPath) {
+            [System.IO.File]::SetAttributes($hostsPath, [System.IO.FileAttributes]::Normal)
+        }
+    } catch { }
+    attrib.exe -r -h -s $hostsPath 2>$null | Out-Null
+
+    # Grant write permission if restricted by third-party blocker tools
+    try {
+        takeown.exe /f $hostsPath /a 2>$null | Out-Null
+        icacls.exe $hostsPath /grant "*S-1-5-32-544:F" "*S-1-5-18:F" /c /q 2>$null | Out-Null
+    } catch { }
+
+    # Write content using UTF-8 without BOM (standard for Windows hosts)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    try {
+        [System.IO.File]::WriteAllText($hostsPath, $Content, $utf8NoBom)
+    } catch {
+        [System.IO.File]::WriteAllText($hostsPath, $Content, [System.Text.Encoding]::ASCII)
+    }
+
+    # Flush DNS cache so changes take effect immediately
+    ipconfig.exe /flushdns 2>$null | Out-Null
+    Write-Log "Hosts file updated successfully and DNS cache flushed."
+    return $true
+}
+
 function Invoke-IntegrityRepair {
     [CmdletBinding()]
     param([Parameter(Mandatory)][object[]]$Items, [string]$SessionDir, [switch]$Apply)
@@ -1063,33 +1109,10 @@ function Invoke-IntegrityRepair {
                 }
             }
             'HostsBlock' {
-                $hostsCopy = Join-Path $bk "hosts_$n.bak"
-                Copy-Item -LiteralPath $it.Target -Destination $hostsCopy -Force
-                Save-BackupRecord -SessionDir $SessionDir -Kind 'FileOverwrite' -Source $it.Target -BackupPath $hostsCopy
                 $cleanLines = Get-Content -LiteralPath $it.Target | Where-Object {
                     $_ -match '^\s*#' -or $_ -notmatch 'adobe|adobelogin|adobe\.io|adobe\.com|typekit|behance'
                 }
-
-                # Unlock file attributes if ReadOnly / System / Hidden was set by blocker tools
-                try {
-                    if (Test-Path -LiteralPath $it.Target) {
-                        [System.IO.File]::SetAttributes($it.Target, [System.IO.FileAttributes]::Normal)
-                    }
-                } catch { }
-                attrib.exe -r -h -s $it.Target 2>$null | Out-Null
-
-                # Reset ACL if write permission was denied by blocker tools
-                try {
-                    takeown.exe /f $it.Target /a 2>$null | Out-Null
-                    icacls.exe $it.Target /grant "*S-1-5-32-544:F" "*S-1-5-18:F" /c /q 2>$null | Out-Null
-                } catch { }
-
-                try {
-                    Set-Content -LiteralPath $it.Target -Value $cleanLines -Encoding ASCII -Force -ErrorAction Stop
-                } catch {
-                    [System.IO.File]::WriteAllLines($it.Target, [string[]]$cleanLines, [System.Text.Encoding]::ASCII)
-                }
-                ipconfig.exe /flushdns 2>$null | Out-Null
+                Save-HostsContent -Content ($cleanLines -join "`r`n") -SessionDir $SessionDir | Out-Null
                 Write-Log "Cleaned Adobe block lines from hosts file"
             }
             'FirewallBlock' {
@@ -1099,7 +1122,7 @@ function Invoke-IntegrityRepair {
             }
         }
     }
-    return $todo
+    return ,$todo
 }
 
 function Get-BackupSessions {

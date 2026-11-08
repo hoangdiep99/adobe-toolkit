@@ -29,7 +29,7 @@ $script:CoreFnNames = @(
     'Get-AdobeCredentialTargets', 'Initialize-Win32Cred', 'ConvertFrom-AppInfoName', 'Get-FriendlyAppName',
     'Get-SignInGroups', 'Get-ProdInstallListXml', 'Get-EmbeddedLeftoverCatalog', 'Get-TokenMap', 'Test-SafeToRemove',
     'Get-SharedComponentPatterns', 'Test-InUse', 'Test-SafeRegistryKey',
-    'Get-LeftoverTargets', 'Get-IntegrityIssues', 'Invoke-IntegrityRepair', 'Get-AppRelatedPaths', 'Invoke-DeepUninstallApps', 'Invoke-WipeAllAdobeTraces', 'Get-BackupSessions', 'Save-BackupRecord', 'Invoke-ManualBackup'
+    'Get-LeftoverTargets', 'Get-IntegrityIssues', 'Invoke-IntegrityRepair', 'Save-HostsContent', 'Get-AppRelatedPaths', 'Invoke-DeepUninstallApps', 'Invoke-WipeAllAdobeTraces', 'Get-BackupSessions', 'Save-BackupRecord', 'Invoke-ManualBackup'
 )
 $script:CoreInitScript = "Set-StrictMode -Version 2; `$script:LogFile = `$null;`r`n" + (
     ($script:CoreFnNames | ForEach-Object {
@@ -267,14 +267,293 @@ Add-Nav 'left'  '4.  Dọn dữ liệu còn sót'   230
 Add-Nav 'unin'  '5.  Gỡ cài đặt tận gốc'   276
 Add-Nav 'undo'  '6.  Hoàn tác / Sao lưu'    322
 
+function Show-HostsEditorDialog {
+    $hostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+    
+    $dlg = New-Object Windows.Forms.Form
+    $dlg.Text = 'Trình chỉnh sửa file hosts trực tiếp (Quyền Quản trị / Administrator)'
+    $dlg.Size = New-Object System.Drawing.Size(960, 640)
+    $dlg.MinimumSize = New-Object System.Drawing.Size(750, 480)
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.FormBorderStyle = 'Sizable'
+    $dlg.MaximizeBox = $true
+    $dlg.MinimizeBox = $false
+    $dlg.ShowInTaskbar = $false
+    $dlg.BackColor = [Drawing.Color]::FromArgb(248, 250, 252)
+    if ($appIcon) { $dlg.Icon = $appIcon }
+
+    # Top Panel: Header, Path, Status, Search
+    $pTop = New-Object Windows.Forms.Panel
+    $pTop.Dock = 'Top'
+    $pTop.Height = 84
+    $pTop.Padding = New-Object Windows.Forms.Padding(14, 10, 14, 6)
+    $dlg.Controls.Add($pTop)
+
+    $lblPath = New-Object Windows.Forms.Label
+    $lblPath.Text = "📁 Đường dẫn: $hostsPath"
+    $lblPath.Font = $fSub
+    $lblPath.ForeColor = [Drawing.Color]::FromArgb(15, 23, 42)
+    $lblPath.Dock = 'Top'
+    $lblPath.Height = 24
+    $pTop.Controls.Add($lblPath)
+
+    $lblStats = New-Object Windows.Forms.Label
+    $lblStats.Font = $fUi
+    $lblStats.ForeColor = $cMuted
+    $lblStats.Dock = 'Top'
+    $lblStats.Height = 22
+    $pTop.Controls.Add($lblStats)
+
+    # Search Bar inside top panel
+    $pSearch = New-Object Windows.Forms.Panel
+    $pSearch.Dock = 'Bottom'
+    $pSearch.Height = 28
+    $pTop.Controls.Add($pSearch)
+
+    $lblFind = New-Object Windows.Forms.Label
+    $lblFind.Text = "Tìm kiếm:"
+    $lblFind.Font = $fUi
+    $lblFind.AutoSize = $true
+    $lblFind.Left = 0; $lblFind.Top = 4
+    $pSearch.Controls.Add($lblFind)
+
+    $txtFind = New-Object Windows.Forms.TextBox
+    $txtFind.Left = 68; $txtFind.Top = 1; $txtFind.Width = 240; $txtFind.Height = 24
+    $txtFind.Font = $fUi
+    $pSearch.Controls.Add($txtFind)
+
+    $btnFindNext = New-Object Windows.Forms.Button
+    $btnFindNext.Text = "Tìm tiếp"
+    $btnFindNext.Left = 316; $btnFindNext.Top = 0; $btnFindNext.Width = 85; $btnFindNext.Height = 26
+    $btnFindNext.FlatStyle = 'Flat'; $btnFindNext.BackColor = 'White'; $btnFindNext.Font = $fUi
+    $pSearch.Controls.Add($btnFindNext)
+
+    $lblSearchHint = New-Object Windows.Forms.Label
+    $lblSearchHint.Text = "(Ctrl+F: Tìm, Ctrl+S: Lưu nhanh)"
+    $lblSearchHint.Font = $fMono
+    $lblSearchHint.ForeColor = $cMuted
+    $lblSearchHint.AutoSize = $true
+    $lblSearchHint.Left = 412; $lblSearchHint.Top = 5
+    $pSearch.Controls.Add($lblSearchHint)
+
+    # Bottom Panel: Action buttons
+    $pBottom = New-Object Windows.Forms.Panel
+    $pBottom.Dock = 'Bottom'
+    $pBottom.Height = 56
+    $pBottom.Padding = New-Object Windows.Forms.Padding(14, 10, 14, 10)
+    $dlg.Controls.Add($pBottom)
+
+    $btnSaveHosts = New-Object Windows.Forms.Button
+    $btnSaveHosts.Text = "💾 Lưu file hosts"
+    $btnSaveHosts.Left = 14; $btnSaveHosts.Top = 10; $btnSaveHosts.Width = 150; $btnSaveHosts.Height = 36
+    $btnSaveHosts.FlatStyle = 'Flat'; $btnSaveHosts.BackColor = $cAccent; $btnSaveHosts.ForeColor = 'White'
+    $btnSaveHosts.Font = $fSub; $btnSaveHosts.Cursor = 'Hand'
+    $btnSaveHosts.FlatAppearance.BorderSize = 0
+    $pBottom.Controls.Add($btnSaveHosts)
+
+    $btnFilterAdobe = New-Object Windows.Forms.Button
+    $btnFilterAdobe.Text = "🧹 Lọc bỏ dòng chặn Adobe"
+    $btnFilterAdobe.Left = 174; $btnFilterAdobe.Top = 10; $btnFilterAdobe.Width = 210; $btnFilterAdobe.Height = 36
+    $btnFilterAdobe.FlatStyle = 'Flat'; $btnFilterAdobe.BackColor = [Drawing.Color]::FromArgb(217, 119, 6)
+    $btnFilterAdobe.ForeColor = 'White'; $btnFilterAdobe.Font = $fSub; $btnFilterAdobe.Cursor = 'Hand'
+    $btnFilterAdobe.FlatAppearance.BorderSize = 0
+    $pBottom.Controls.Add($btnFilterAdobe)
+
+    $btnReload = New-Object Windows.Forms.Button
+    $btnReload.Text = "🔄 Tải lại gốc"
+    $btnReload.Left = 394; $btnReload.Top = 10; $btnReload.Width = 120; $btnReload.Height = 36
+    $btnReload.FlatStyle = 'Flat'; $btnReload.BackColor = 'White'; $btnReload.ForeColor = [Drawing.Color]::FromArgb(31, 41, 55)
+    $btnReload.Font = $fUi; $btnReload.Cursor = 'Hand'
+    $pBottom.Controls.Add($btnReload)
+
+    $btnNotepad = New-Object Windows.Forms.Button
+    $btnNotepad.Text = "📂 Mở bằng Notepad"
+    $btnNotepad.Left = 524; $btnNotepad.Top = 10; $btnNotepad.Width = 160; $btnNotepad.Height = 36
+    $btnNotepad.FlatStyle = 'Flat'; $btnNotepad.BackColor = 'White'; $btnNotepad.ForeColor = [Drawing.Color]::FromArgb(31, 41, 55)
+    $btnNotepad.Font = $fUi; $btnNotepad.Cursor = 'Hand'
+    $pBottom.Controls.Add($btnNotepad)
+
+    $btnClose = New-Object Windows.Forms.Button
+    $btnClose.Text = "Đóng"
+    $btnClose.Anchor = 'Top,Right'
+    $btnClose.Left = $pBottom.Width - 110; $btnClose.Top = 10; $btnClose.Width = 95; $btnClose.Height = 36
+    $btnClose.FlatStyle = 'Flat'; $btnClose.BackColor = 'White'; $btnClose.ForeColor = [Drawing.Color]::FromArgb(31, 41, 55)
+    $btnClose.Font = $fUi; $btnClose.Cursor = 'Hand'
+    $pBottom.Controls.Add($btnClose)
+
+    # Center Panel: Textbox
+    $pCenter = New-Object Windows.Forms.Panel
+    $pCenter.Dock = 'Fill'
+    $pCenter.Padding = New-Object Windows.Forms.Padding(14, 0, 14, 0)
+    $dlg.Controls.Add($pCenter)
+
+    $txtEditor = New-Object Windows.Forms.TextBox
+    $txtEditor.Multiline = $true
+    $txtEditor.Dock = 'Fill'
+    $txtEditor.ScrollBars = 'Both'
+    $txtEditor.WordWrap = $false
+    $txtEditor.AcceptsTab = $true
+    $txtEditor.AcceptsReturn = $true
+    $txtEditor.MaxLength = [int]::MaxValue
+    $txtEditor.Font = New-Object System.Drawing.Font('Consolas', 10.5)
+    $txtEditor.BackColor = [Drawing.Color]::FromArgb(255, 255, 255)
+    $txtEditor.ForeColor = [Drawing.Color]::FromArgb(15, 23, 42)
+    $txtEditor.BorderStyle = 'FixedSingle'
+    $pCenter.Controls.Add($txtEditor)
+
+    # Helper function to reload stats
+    $UpdateStats = {
+        $lines = $txtEditor.Lines
+        $total = @($lines).Count
+        $adobeCount = 0
+        foreach ($l in $lines) {
+            if ($l -match 'adobe|adobelogin|adobe\.io|adobe\.com|typekit|behance') {
+                $adobeCount++
+            }
+        }
+        $lblStats.Text = "📊 Tổng số: {0:N0} dòng | Phát hiện: {1:N0} dòng chặn Adobe | Trạng thái: Sẵn sàng" -f $total, $adobeCount
+        if ($adobeCount -gt 0) {
+            $lblStats.ForeColor = $cWarn
+            $btnFilterAdobe.Enabled = $true
+        } else {
+            $lblStats.ForeColor = $cOk
+            $btnFilterAdobe.Enabled = $false
+        }
+    }
+
+    # Load File Content
+    $LoadFile = {
+        if (Test-Path -LiteralPath $hostsPath) {
+            try {
+                $txtEditor.Text = [System.IO.File]::ReadAllText($hostsPath)
+            } catch {
+                $txtEditor.Text = (Get-Content -LiteralPath $hostsPath -Raw -ErrorAction SilentlyContinue)
+            }
+        } else {
+            $txtEditor.Text = "# Hosts file`r`n127.0.0.1 localhost`r`n::1 localhost`r`n"
+        }
+        & $UpdateStats
+    }
+    & $LoadFile
+
+    $txtEditor.Add_TextChanged({ & $UpdateStats })
+
+    # Search Logic
+    $script:searchIndex = 0
+    $FindNext = {
+        $term = $txtFind.Text
+        if ([string]::IsNullOrEmpty($term)) { return }
+        $content = $txtEditor.Text
+        $idx = $content.IndexOf($term, $script:searchIndex, [StringComparison]::OrdinalIgnoreCase)
+        if ($idx -lt 0 -and $script:searchIndex -gt 0) {
+            $idx = $content.IndexOf($term, 0, [StringComparison]::OrdinalIgnoreCase)
+        }
+        if ($idx -ge 0) {
+            $txtEditor.SelectionStart = $idx
+            $txtEditor.SelectionLength = $term.Length
+            $txtEditor.ScrollToCaret()
+            $txtEditor.Focus()
+            $script:searchIndex = $idx + $term.Length
+        } else {
+            [void][Windows.Forms.MessageBox]::Show("Không tìm thấy: '$term'", 'Tìm kiếm', 'OK', 'Information')
+            $script:searchIndex = 0
+        }
+    }
+    $btnFindNext.Add_Click({ & $FindNext })
+    $txtFind.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq 'Enter') { $e.SuppressKeyPress = $true; & $FindNext } })
+
+    # Filter Adobe lines
+    $btnFilterAdobe.Add_Click({
+        $lines = $txtEditor.Lines
+        $clean = New-Object System.Collections.Generic.List[string]
+        $removed = 0
+        foreach ($l in $lines) {
+            if ($l -match 'adobe|adobelogin|adobe\.io|adobe\.com|typekit|behance') {
+                $removed++
+            } else {
+                $clean.Add($l)
+            }
+        }
+        if ($removed -eq 0) {
+            [void][Windows.Forms.MessageBox]::Show('Không còn dòng chặn Adobe nào trong nội dung hiện tại.', 'Thông báo', 'OK', 'Information')
+            return
+        }
+        if ([Windows.Forms.MessageBox]::Show("Tìm thấy $removed dòng liên quan đến Adobe.`n`nBạn có muốn loại bỏ tất cả $removed dòng này khỏi nội dung?", 'Xác nhận lọc bỏ', 'YesNo', 'Question') -eq 'Yes') {
+            $txtEditor.Text = [string]::Join([Environment]::NewLine, $clean)
+            & $UpdateStats
+            [void][Windows.Forms.MessageBox]::Show("Đã lọc bỏ $removed dòng chặn Adobe.`n`nHãy nhấn nút '💾 Lưu file hosts' để áp dụng xuống hệ thống.", 'Đã lọc xong', 'OK', 'Information')
+        }
+    })
+
+    # Save button
+    $btnSaveHosts.Add_Click({
+        try {
+            $null = Save-HostsContent -Content $txtEditor.Text -SessionDir $script:session
+            Say "Đã chỉnh sửa và lưu file hosts trực tiếp thành công. Sao lưu tại: $($script:session)"
+            [void][Windows.Forms.MessageBox]::Show("Đã lưu thành công file hosts!`n`nĐã xoá thuộc tính ReadOnly/Hidden nếu có, cấp quyền Quản trị, tạo bản sao lưu trong thư mục phiên và làm mới bộ nhớ cache DNS (ipconfig /flushdns).", 'Lưu file hosts thành công', 'OK', 'Information')
+            & $UpdateStats
+            if ($pages['orig'].Visible -and $btnScanOrig.Enabled) {
+                & $btnScanOrig.PerformClick()
+            } elseif ($pages['diag'].Visible -and $btnDiag.Enabled) {
+                & $btnDiag.PerformClick()
+            }
+        } catch {
+            Fail "Không thể lưu file hosts: $($_.Exception.Message)"
+        }
+    })
+
+    # Reload button
+    $btnReload.Add_Click({
+        if ([Windows.Forms.MessageBox]::Show('Tải lại nội dung từ ổ đĩa? Các thay đổi chưa lưu sẽ bị huỷ.', 'Xác nhận', 'YesNo', 'Question') -eq 'Yes') {
+            & $LoadFile
+        }
+    })
+
+    # Notepad button
+    $btnNotepad.Add_Click({
+        try {
+            Start-Process notepad.exe -ArgumentList "`"$hostsPath`""
+        } catch {
+            Fail $_.Exception.Message
+        }
+    })
+
+    $btnClose.Add_Click({ $dlg.Close() })
+
+    # Shortcut keys
+    $dlg.KeyPreview = $true
+    $dlg.Add_KeyDown({
+        param($s, $e)
+        if ($e.Control -and $e.KeyCode -eq 'S') {
+            $e.SuppressKeyPress = $true
+            & $btnSaveHosts.PerformClick()
+        }
+        if ($e.Control -and $e.KeyCode -eq 'F') {
+            $e.SuppressKeyPress = $true
+            $txtFind.Focus()
+            $txtFind.SelectAll()
+        }
+    })
+
+    [void]$dlg.ShowDialog($form)
+}
+
 # ===================================================== Trang 1: chan doan
 $p1 = New-Page 'Chẩn đoán máy' 'Kiểm tra giờ máy, file hosts, tường lửa, chữ ký số file Adobe (.bak/patch) và token đăng nhập. Chạy ngầm không đơ máy.'
 $pages['diag'] = $p1
 $btnDiag = New-Btn $p1 'Chạy chẩn đoán' 0 150 $true
 $btnSave = New-Btn $p1 'Lưu báo cáo (JSON)' 160 175
 $btnKill1 = New-Btn $p1 'Đóng tiến trình Adobe' 345 185
+$btnHosts1 = New-Btn $p1 '📝 Sửa file hosts' 540 160
+$btnHosts1.Add_Click({ Show-HostsEditorDialog })
 $list1 = New-List $p1 @(@('Hạng mục', 235), @('Kết quả', 120), @('Chi tiết', 440))
 $list1.Height = 235; $list1.Anchor = 'Top,Left,Right'
+$list1.Add_DoubleClick({
+    if ($list1.SelectedItems.Count -gt 0) {
+        $txt = $list1.SelectedItems[0].SubItems[0].Text
+        if ($txt -match 'hosts') { Show-HostsEditorDialog }
+    }
+})
 $evalCap = New-Object Windows.Forms.Label; $evalCap.Left = 0; $evalCap.Top = 368; $evalCap.Width = 760; $evalCap.Height = 20
 $evalCap.Font = $fSub; $evalCap.ForeColor = $cAccent; $evalCap.Anchor = 'Top,Left,Right'
 $evalCap.Text = '📊 Phân tích kỹ thuật & Khuyến nghị xử lý (Tự động chấm điểm Offline - Không cần API):'
@@ -438,9 +717,17 @@ $pOrig = New-Page 'Khôi phục nguyên bản (Khử Patch & Mở chặn mạng)
 $pages['orig'] = $pOrig
 $btnScanOrig  = New-Btn $pOrig 'Quét dấu vết Patch / Chặn' 0 210 $true
 $btnApplyOrig = New-Btn $pOrig 'Khôi phục mục đã chọn' 222 190; $btnApplyOrig.Enabled = $false
+$btnEditHosts = New-Btn $pOrig '📝 Sửa file hosts trực tiếp' 422 200
+$btnEditHosts.Add_Click({ Show-HostsEditorDialog })
 $listOrig = New-List $pOrig @(@('Hạng mục', 145), @('Đối tượng', 360), @('Hành động / Ghi chú', 310))
 $listOrig.CheckBoxes = $true
 $script:origIssues = @()
+$listOrig.Add_DoubleClick({
+    if ($listOrig.SelectedItems.Count -gt 0) {
+        $tag = $listOrig.SelectedItems[0].Tag
+        if ($tag -and $tag.Kind -eq 'HostsBlock') { Show-HostsEditorDialog }
+    }
+})
 
 $btnScanOrig.Add_Click({
     Start-AsyncScan -CommandText 'Get-IntegrityIssues' -TriggerButton $btnScanOrig -StatusText 'Đang kiểm tra chữ ký số file .bak, hosts và tường lửa...' -OnSuccess {
@@ -475,10 +762,12 @@ $btnApplyOrig.Add_Click({
     if (-not $picked.Count) { Info 'Chưa chọn mục nào có thể khôi phục tự động.'; return }
     if (-not (Ask "Khôi phục $($picked.Count) mục đã chọn về nguyên bản (file gốc .bak / hosts / tường lửa)?`n`nTrạng thái hiện tại sẽ được sao lưu để có thể hoàn tác.")) { return }
     try {
-        Ensure-AdobeClosed; $done = Invoke-IntegrityRepair -Items $picked -SessionDir $script:session -Apply
-        Say "Đã khôi phục $($done.Count) mục về nguyên bản. Sao lưu tại: $($script:session)"
+        Ensure-AdobeClosed
+        $done = @(Invoke-IntegrityRepair -Items $picked -SessionDir $script:session -Apply)
+        $cnt = @($done).Count
+        Say "Đã khôi phục $cnt mục về nguyên bản. Sao lưu tại: $($script:session)"
         $listOrig.Items.Clear(); $btnApplyOrig.Enabled = $false
-        Info "Đã khôi phục $($done.Count) mục về nguyên bản.`nSao lưu tại: $($script:session)"
+        Info "Đã khôi phục $cnt mục về nguyên bản.`nSao lưu tại: $($script:session)"
     } catch { Fail $_.Exception.Message }
 })
 
